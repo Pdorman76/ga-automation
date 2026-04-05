@@ -30,8 +30,11 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+# Import data structures for building tabs dynamically
+from parsers.monthly_report_template import ReportLine, TabStructure
 
-# ── Styling utilities ────────────────────────────────────────
+
+# ââ Styling utilities ââââââââââââââââââââââââââââââââââââââââ
 
 def _header_style():
     """Create dark blue header style with white text."""
@@ -108,7 +111,181 @@ def _auto_width_columns(ws, columns: int):
         ws.column_dimensions[col_letter].width = min(max_len + 2, 50)
 
 
-# ── Main report generator ────────────────────────────────────
+# ââ Helper functions to build tabs from GL and IS data ââââââââ
+
+def _build_bs_tab_from_gl(gl_data) -> Optional[TabStructure]:
+    """
+    Build Balance Sheet tab from GL data.
+    Filter to BS account codes (1xxxxx through 3xxxxx â assets, liabilities, equity).
+    Columns: Account Code, Account Name, Balance Current Period, Beginning Balance, Net Change.
+    """
+    if not gl_data or not hasattr(gl_data, 'accounts'):
+        return None
+
+    line_items = []
+    for account in gl_data.accounts:
+        # Filter to balance sheet accounts (asset, liability, equity: codes 1xxxxx, 2xxxxx, 3xxxxx)
+        first_digit = account.account_code[0] if account.account_code else '0'
+        if first_digit not in ('1', '2', '3'):
+            continue
+
+        report_line = ReportLine(
+            account_code=account.account_code,
+            account_name=account.account_name,
+            values={
+                'Balance Current Period': account.ending_balance,
+                'Beginning Balance': account.beginning_balance,
+                'Net Change': account.net_change,
+            },
+            row_number=0,
+            is_total=False,
+        )
+        line_items.append(report_line)
+
+    return TabStructure(
+        name='BS',
+        columns=['account_code', 'account_name', 'Balance Current Period', 'Beginning Balance', 'Net Change'],
+        data_start_row=2,
+        row_count=len(line_items),
+        line_items=line_items,
+    )
+
+
+def _build_is_tab_from_is_data(is_data) -> Optional[TabStructure]:
+    """
+    Build Income Statement tab from IS parsed data.
+    Columns: Account Code, Account Name, PTD, PTD %, YTD, YTD %.
+    is_data is a list of dicts with keys: account_code, account_name, ptd_amount, ptd_percent, ytd_amount, ytd_percent
+    """
+    if not is_data:
+        return None
+
+    line_items = []
+    for row_num, item in enumerate(is_data, start=2):
+        report_line = ReportLine(
+            account_code=item.get('account_code', ''),
+            account_name=item.get('account_name', ''),
+            values={
+                'PTD': item.get('ptd_amount', 0),
+                'PTD %': item.get('ptd_percent', 0),
+                'YTD': item.get('ytd_amount', 0),
+                'YTD %': item.get('ytd_percent', 0),
+            },
+            row_number=row_num,
+            is_total=False,
+        )
+        line_items.append(report_line)
+
+    return TabStructure(
+        name='IS',
+        columns=['account_code', 'account_name', 'PTD', 'PTD %', 'YTD', 'YTD %'],
+        data_start_row=2,
+        row_count=len(line_items),
+        line_items=line_items,
+    )
+
+
+def _build_t12_tab_from_gl(gl_data) -> Optional[TabStructure]:
+    """
+    Build Trailing 12 Months tab from GL data.
+    For now, create a single-month T12 with current month's net_change in the appropriate column.
+    Columns: Account Code, Account Name, Jan 2026...Dec 2026, Total.
+    """
+    if not gl_data or not hasattr(gl_data, 'accounts'):
+        return None
+
+    # Determine current month from metadata period (e.g., "Feb-2026" -> month 2)
+    period_str = getattr(gl_data.metadata, 'period', '')
+    month_num = 2  # Default to Feb
+    if '-' in period_str:
+        month_name = period_str.split('-')[0]
+        month_map = {
+            'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+            'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12,
+        }
+        month_num = month_map.get(month_name, 2)
+
+    # Month headers: Jan 2026...Dec 2026, Total
+    year = 2026
+    month_headers = [f'{month} {year}' for month in
+                     ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']]
+    month_headers.append('Total')
+
+    line_items = []
+    for account in gl_data.accounts:
+        values = {}
+        total = 0
+        for i, month_header in enumerate(month_headers[:-1]):  # Exclude "Total" for now
+            if i + 1 == month_num:
+                # Current month gets the net_change
+                values[month_header] = account.net_change
+                total += account.net_change
+            else:
+                # Other months get 0
+                values[month_header] = 0
+
+        values['Total'] = total
+
+        report_line = ReportLine(
+            account_code=account.account_code,
+            account_name=account.account_name,
+            values=values,
+            row_number=0,
+            is_total=False,
+        )
+        line_items.append(report_line)
+
+    return TabStructure(
+        name='T12',
+        columns=['account_code', 'account_name'] + month_headers,
+        data_start_row=2,
+        row_count=len(line_items),
+        line_items=line_items,
+    )
+
+
+def _build_tb_mtd_tab_from_gl(gl_data) -> Optional[TabStructure]:
+    """
+    Build Trial Balance MTD tab from GL data.
+    Columns: Account Code, Account Name, Forward Balance, Debit, Credit, Ending Balance.
+    """
+    if not gl_data or not hasattr(gl_data, 'accounts'):
+        return None
+
+    line_items = []
+    for account in gl_data.accounts:
+        report_line = ReportLine(
+            account_code=account.account_code,
+            account_name=account.account_name,
+            values={
+                'Forward Balance': account.beginning_balance,
+                'Debit': account.total_debits,
+                'Credit': account.total_credits,
+                'Ending Balance': account.ending_balance,
+            },
+            row_number=0,
+            is_total=False,
+        )
+        line_items.append(report_line)
+
+    return TabStructure(
+        name='TB - MTD',
+        columns=['account_code', 'account_name', 'Forward Balance', 'Debit', 'Credit', 'Ending Balance'],
+        data_start_row=2,
+        row_count=len(line_items),
+        line_items=line_items,
+    )
+
+
+def _build_tb_ytd_tab_from_gl(gl_data) -> Optional[TabStructure]:
+    """
+    Build Trial Balance YTD tab from GL data.
+    Same as TB-MTD for now (single month = YTD).
+    """
+    return _build_tb_mtd_tab_from_gl(gl_data)
+
+
+# ââ Main report generator ââââââââââââââââââââââââââââââââââââ
 
 def generate_report(engine_result, output_path: str) -> str:
     """
@@ -126,39 +303,41 @@ def generate_report(engine_result, output_path: str) -> str:
 
     # Extract parsed data
     gl_data = engine_result.parsed.get('gl')
-    monthly_report_data = engine_result.parsed.get('monthly_report')
-    gl_ytd = engine_result.parsed.get('gl')  # Same source, just YTD filter
-    rent_roll_data = engine_result.parsed.get('rent_roll')
     is_data = engine_result.parsed.get('income_statement')
-    bc_data = engine_result.parsed.get('budget_comparison')
+    rent_roll_data = engine_result.parsed.get('rent_roll')
 
     # --- Tab 1: Balance Sheet (BS) ---
-    if monthly_report_data and 'BS' in monthly_report_data.tabs:
-        _write_bs_tab(wb, monthly_report_data.tabs['BS'])
+    bs_tab = _build_bs_tab_from_gl(gl_data)
+    if bs_tab:
+        _write_bs_tab(wb, bs_tab)
     else:
         _write_empty_tab(wb, 'BS')
 
     # --- Tab 2: Income Statement (IS) ---
-    if monthly_report_data and 'IS' in monthly_report_data.tabs:
-        _write_is_tab(wb, monthly_report_data.tabs['IS'])
+    is_tab = _build_is_tab_from_is_data(is_data)
+    if is_tab:
+        _write_is_tab(wb, is_tab)
     else:
         _write_empty_tab(wb, 'IS')
 
     # --- Tab 3: Trailing 12 (T12) ---
-    if monthly_report_data and 'T12' in monthly_report_data.tabs:
-        _write_t12_tab(wb, monthly_report_data.tabs['T12'])
+    t12_tab = _build_t12_tab_from_gl(gl_data)
+    if t12_tab:
+        _write_t12_tab(wb, t12_tab)
     else:
         _write_empty_tab(wb, 'T12')
 
     # --- Tab 4: Trial Balance MTD (TB-MTD) ---
-    if monthly_report_data and 'TB - MTD' in monthly_report_data.tabs:
-        _write_tb_tab(wb, monthly_report_data.tabs['TB - MTD'], 'TB - MTD')
+    tb_mtd_tab = _build_tb_mtd_tab_from_gl(gl_data)
+    if tb_mtd_tab:
+        _write_tb_tab(wb, tb_mtd_tab, 'TB - MTD')
     else:
         _write_empty_tab(wb, 'TB - MTD')
 
     # --- Tab 5: Trial Balance YTD (TB-YTD) ---
-    if monthly_report_data and 'TB - YTD' in monthly_report_data.tabs:
-        _write_tb_tab(wb, monthly_report_data.tabs['TB - YTD'], 'TB - YTD')
+    tb_ytd_tab = _build_tb_ytd_tab_from_gl(gl_data)
+    if tb_ytd_tab:
+        _write_tb_tab(wb, tb_ytd_tab, 'TB - YTD')
     else:
         _write_empty_tab(wb, 'TB - YTD')
 
@@ -185,7 +364,7 @@ def generate_report(engine_result, output_path: str) -> str:
     return output_path
 
 
-# ── Tab writers ─────────────────────────────────────────────
+# ââ Tab writers âââââââââââââââââââââââââââââââââââââââââââââ
 
 def _write_empty_tab(wb: Workbook, tab_name: str):
     """Create an empty tab with proper headers."""
@@ -448,7 +627,7 @@ def _write_tenancy_tab(wb: Workbook, rent_roll_data: List[Dict]):
     _auto_width_columns(ws, len(headers))
 
 
-# ── Exception report generator ───────────────────────────────
+# ââ Exception report generator âââââââââââââââââââââââââââââââ
 
 def generate_exception_report(engine_result, output_path: str) -> str:
     """
@@ -727,7 +906,7 @@ def _write_debt_service_tab(wb: Workbook, engine_result):
     ws.column_dimensions['C'].width = 20
 
 
-# ── Test/Demo ────────────────────────────────────────────────
+# ââ Test/Demo ââââââââââââââââââââââââââââââââââââââââââââââââ
 
 if __name__ == "__main__":
     """
