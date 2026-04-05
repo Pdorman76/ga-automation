@@ -8,11 +8,11 @@ What this parser does (in plain English):
 -----------------------------------------
 1. Opens the Excel file Yardi exports for the General Ledger
 2. Reads the metadata at the top (property name, period, book type)
-3. Finds every account section — each account starts with a "Beginning Balance"
+3. Finds every account section â each account starts with a "Beginning Balance"
    row and ends with an "Ending Balance" row
 4. Extracts every transaction within each account: date, description, who/what,
    control number, reference number, debit amount, credit amount, running balance
-5. Validates the data — checks that debits and credits balance, that every
+5. Validates the data â checks that debits and credits balance, that every
    transaction has the fields it needs, and flags anything that looks wrong
 6. Returns a clean, structured result that other parts of the pipeline can use
    without knowing anything about Excel or Yardi's file format
@@ -21,7 +21,7 @@ What goes in:  A .xlsx file exported from Yardi (GL Detail report)
 What comes out: A dictionary with metadata, a list of accounts (each with its
                transactions), and a validation report
 
-The pipeline uses this to build work papers — matching every GL entry to its
+The pipeline uses this to build work papers â matching every GL entry to its
 source invoice (from Nexus) and its bank payment by reference number.
 """
 
@@ -33,7 +33,7 @@ import openpyxl
 
 
 # ---------------------------------------------------------------------------
-# Data structures — these define what the parser produces
+# Data structures â these define what the parser produces
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -318,14 +318,14 @@ def parse_gl(filepath: str) -> GLParseResult:
 
         # Grand total row (last row where H == I, confirming GL balance)
         if not col_a and col_h > 0 and col_i > 0 and abs(col_h - col_i) < 0.01:
-            # This is the verification row ― debits should equal credits
+            # This is the verification row â debits should equal credits
             if abs(col_h - col_i) >= 0.01:
                 validation_warnings.append(
                     f"Grand total mismatch: debits={col_h:.2f} != credits={col_i:.2f}"
                 )
             continue
 
-        # Transaction row — belongs to current account
+        # Transaction row â belongs to current account
         if current_account_code:
             txn = GLTransaction(
                 account_code=current_account_code,
@@ -367,7 +367,7 @@ def parse_gl(filepath: str) -> GLParseResult:
         "accounts_parsed": len(accounts),
         "transactions_parsed": len(all_transactions),
         "unbalanced_accounts": len(unbalanced_accounts),
-        "woarnings": validation_warnings,
+        "warnings": validation_warnings,
     }
 
     return GLParseResult(
@@ -393,7 +393,7 @@ if __name__ == "__main__":
     result = parse_gl(sys.argv[1])
 
     print("=" * 70)
-    print(f"YARDI GL PARSER ♤ {result.metadata.property_name}")
+    print(f"YARDI GL PARSER â {result.metadata.property_name}")
     print(f"Period: {result.metadata.period}  |  Book: {result.metadata.book}")
     print(f"Source: {result.metadata.source_file}")
     print("=" * 70)
@@ -401,22 +401,22 @@ if __name__ == "__main__":
     print(f"Transactions: {result.total_transactions}")
     print(f"Total Debits: ${result.validation['total_debits']:,.2f}")
     print(f"Total Credits: ${result.validation['total_credits']:,.2f}")
-    print(f"GL Balanced:  ${result.validation['gl_balanced']}")
+    print(f"GL Balanced:  {result.validation['gl_balanced']}")
     print(f"Validation:   {result.validation['status']}")
 
     if result.validation["warnings"]:
         print(f"\nWarnings ({len(result.validation['warnings'])}):")
         for w in result.validation["warnings"]:
-            print(f"  ⚠ {w}")
+            print(f"  â  {w}")
 
-    print(f"\n{\"Account\":<12} {\"Name\":<35} {\"Begin\":>14} {\"DebCits\":>14} {\"Credits\":>14} {\"Ending\":>14} {\"TvT\":>6} {\"OK\":>4}")
+    print(f"\n{'Account':<12} {'Name':<35} {'Begin':>14} {'Debits':>14} {'Credits':>14} {'Ending':>14} {'Txns':>6} {'OK':>4}")
     print("-" * 120)
     for a in result.accounts:
         print(
             f"{a.account_code:<12} {a.account_name[:35]:<35} "
             f"${a.beginning_balance:>12,.2f} ${a.total_debits:>12,.2f} "
             f"${a.total_credits:>12,.2f} ${a.ending_balance:>12,.2f} "
-            f"{a.transaction_count:>6} {'✓' if a.is_balanced else '✗':>4}"
+            f"{a.transaction_count:>6} {'â' if a.is_balanced else 'â':>4}"
         )
 
     # Print first 5 transactions as sample
