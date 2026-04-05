@@ -64,7 +64,36 @@ def parse(filepath: str) -> List[Dict[str, Any]]:
     if header_row_idx is None:
         return records
 
-    # Parse0]) if len(row) > 10 else 0.0
+    # Parse data rows
+    for row_idx in range(header_row_idx + 1, worksheet.nrows):
+        row = [worksheet.cell_value(row_idx, col_idx) for col_idx in range(worksheet.ncols)]
+
+        # Skip empty rows
+        if all(cell == '' or cell is None for cell in row):
+            continue
+
+        # Check for subtotal or grand total rows (skip them)
+        if 'Sub-Total' in str(row[6]) or 'Grand Total' in str(row[7]):
+            continue
+
+        # Check if this is a vendor row (has vendor name in column 1, empty property)
+        vendor = row[1] if len(row) > 1 else None
+        property_val = row[2] if len(row) > 2 else None
+
+        if vendor and not property_val:
+            # This is a vendor header row
+            current_vendor = vendor
+            continue
+
+        # This is an invoice detail row
+        if current_vendor and property_val:
+            try:
+                # Parse dates
+                received_date = _parse_date(row[3]) if len(row) > 3 else None
+                invoice_date = _parse_date(row[5]) if len(row) > 5 else None
+
+                # Parse amount
+                amount = _parse_amount(row[10]) if len(row) > 10 else 0.0
 
                 record = {
                     'vendor': current_vendor,
