@@ -369,21 +369,21 @@ def check_budget_variances(is_result, budget_result, threshold_pct=10.0) -> Tupl
 
     for item in budget_items:
         if isinstance(item, dict):
-            code = item.get('account_code', '')
-            name = item.get('account_name', '')
+            code = str(item.get('account_code', '') or '').strip()
+            name = str(item.get('account_name', '') or '').strip()
             ptd_actual = item.get('ptd_actual', 0) or 0
             ptd_budget = item.get('ptd_budget', 0) or 0
             variance = item.get('ptd_variance', 0) or 0
             var_pct = item.get('ptd_percent_var', item.get('ptd_variance_pct', 0))
         else:
-            code = getattr(item, 'account_code', '')
-            name = getattr(item, 'account_name', '')
+            code = str(getattr(item, 'account_code', '') or '').strip()
+            name = str(getattr(item, 'account_name', '') or '').strip()
             ptd_actual = getattr(item, 'ptd_actual', 0) or 0
             ptd_budget = getattr(item, 'ptd_budget', 0) or 0
             variance = getattr(item, 'ptd_variance', ptd_actual - ptd_budget)
             var_pct = getattr(item, 'ptd_variance_pct', None)
 
-        if not code or "TOTAL" in str(name).upper():
+        if not code or "TOTAL" in name.upper():
             continue
 
         # Calculate variance % if not provided
