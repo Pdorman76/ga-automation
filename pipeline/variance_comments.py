@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 
-# ââ Data-driven draft generation âââââââââââââââââââââââââââââ
+# ── Data-driven draft generation ─────────────────────────────
 
 def _build_variance_context(variance: dict, gl_data, budget_data=None) -> dict:
     """
@@ -31,10 +31,10 @@ def _build_variance_context(variance: dict, gl_data, budget_data=None) -> dict:
     Returns:
         Dict with variance info + supporting GL transaction detail
     """
-    acct_code = variance.get('account_code', '')
+    acct_code = str(variance.get('account_code', '') or '')
     context = {
         'account_code': acct_code,
-        'account_name': variance.get('account_name', ''),
+        'account_name': str(variance.get('account_name', '') or ''),
         'ptd_actual': variance.get('ptd_actual', 0),
         'ptd_budget': variance.get('ptd_budget', 0),
         'variance_amount': variance.get('variance', 0),
@@ -89,7 +89,7 @@ def _build_variance_context(variance: dict, gl_data, budget_data=None) -> dict:
 def generate_data_driven_comment(context: dict) -> str:
     """
     Generate a factual, data-driven variance comment from GL detail.
-    No API call â purely mechanical.
+    No API call — purely mechanical.
     """
     acct = context['account_name']
     var_amt = context['variance_amount']
@@ -118,7 +118,7 @@ def generate_data_driven_comment(context: dict) -> str:
     return comment
 
 
-# ââ Claude API narrative generation ââââââââââââââââââââââââââ
+# ── Claude API narrative generation ──────────────────────────
 
 def _build_api_prompt(contexts: List[dict], period: str, property_name: str) -> str:
     """Build the prompt for Claude API to generate variance narratives."""
@@ -126,7 +126,7 @@ def _build_api_prompt(contexts: List[dict], period: str, property_name: str) -> 
     variance_details = []
     for ctx in contexts:
         detail = f"""
-Account: {ctx['account_code']} â {ctx['account_name']}
+Account: {ctx['account_code']} — {ctx['account_name']}
   Actual: ${ctx['ptd_actual']:,.2f}  |  Budget: ${ctx['ptd_budget']:,.2f}
   Variance: ${ctx['variance_amount']:+,.2f} ({ctx['variance_pct']:+.1f}%)
   GL Transactions ({ctx['transaction_count']}):"""
@@ -145,7 +145,7 @@ Property: {property_name}
 Period: {period}
 
 Generate a concise 1-2 sentence narrative explanation for each material budget variance below.
-Focus on the WHY â what drove the variance based on the GL transaction detail provided.
+Focus on the WHY — what drove the variance based on the GL transaction detail provided.
 Use professional accounting language suitable for an institutional investor review.
 Do NOT speculate beyond what the data shows. If the cause is unclear from the transactions,
 say "requires further investigation" or "timing difference pending verification."
@@ -217,10 +217,10 @@ def generate_api_comments(contexts: List[dict], period: str = '',
         return result
 
     except ImportError:
-        # anthropic package not installed â fall back
+        # anthropic package not installed — fall back
         return {ctx['account_code']: generate_data_driven_comment(ctx) for ctx in contexts}
     except Exception as e:
-        # Any API error â fall back with note
+        # Any API error — fall back with note
         result = {}
         for ctx in contexts:
             comment = generate_data_driven_comment(ctx)
@@ -228,7 +228,7 @@ def generate_api_comments(contexts: List[dict], period: str = '',
         return result
 
 
-# ââ Main entry point âââââââââââââââââââââââââââââââââââââââââ
+# ── Main entry point ─────────────────────────────────────────
 
 def generate_variance_comments(engine_result, api_key: str = None) -> List[dict]:
     """
