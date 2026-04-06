@@ -109,10 +109,23 @@ def _parse_pnc_corporate(text: str, result: Dict[str, Any]) -> None:
                 break
 
     # Extract balance summary
+    # PNC format: "Balance Summary" header, then column labels across 2 lines
+    # ("Beginning ... Ending" / "balance ... balance"), then a values line
+    # with 4 numbers: beginning_bal, deposits, debits, ending_bal
     for i, line in enumerate(lines):
         if 'Balance Summary' in line:
-            # Search more lines ahead for balances (expanded from 5 to 10)
+            # First try: look for a header line with both Beginning and Ending
             for j in range(i + 1, min(i + 10, len(lines))):
+                if 'Beginning' in lines[j] and 'Ending' in lines[j]:
+                    # Column header found â scan next few lines for the values row
+                    for k in range(j + 1, min(j + 4, len(lines))):
+                        amounts = re.findall(r'[\d,]+\.\d{2}', lines[k])
+                        if len(amounts) >= 2:
+                            result['beginning_balance'] = float(amounts[0].replace(',', ''))
+                            result['ending_balance'] = float(amounts[-1].replace(',', ''))
+                            break
+                    break
+                # Fallback: Beginning and Ending on separate lines (some PNC formats)
                 if 'Beginning' in lines[j]:
                     match = re.search(r'\$?\s*([\d,]+(?:\.\d{2})?)', lines[j])
                     if match:
