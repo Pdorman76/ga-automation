@@ -7,8 +7,8 @@ Generates journal entries for accruals from three sources:
   Layer 3: Historical pattern detection (recurring expenses from prior months)
 
 Outputs:
-  1. Yardi JE import file (Excel) â ready for direct upload
-  2. Workpaper review schedule â DR/CR detail for review before posting
+  1. Yardi JE import file (Excel) — ready for direct upload
+  2. Workpaper review schedule — DR/CR detail for review before posting
 
 Each accrual generates a two-line entry:
   DR  [Expense GL Account]
@@ -22,7 +22,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 
-# ââ Constants ââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Constants ────────────────────────────────────────────────
 
 AP_ACCRUAL_ACCOUNT = '211200'
 AP_ACCRUAL_NAME = 'Accrued Expenses'
@@ -63,7 +63,7 @@ def _subhdr_fill():
     return PatternFill(start_color=LIGHT_BLUE, end_color=LIGHT_BLUE, fill_type='solid')
 
 
-# ââ Layer 2: Budget gap detection ââââââââââââââââââââââââââââ
+# ── Layer 2: Budget gap detection ────────────────────────────
 
 def detect_budget_gaps(gl_data, budget_data) -> List[Dict[str, Any]]:
     """
@@ -93,17 +93,17 @@ def detect_budget_gaps(gl_data, budget_data) -> List[Dict[str, Any]]:
 
     for item in budget_items:
         if isinstance(item, dict):
-            code = item.get('account_code', '')
-            name = item.get('account_name', '')
+            code = str(item.get('account_code', '') or '').strip()
+            name = str(item.get('account_name', '') or '').strip()
             ptd_budget = item.get('ptd_budget', 0) or 0
             ptd_actual = item.get('ptd_actual', 0) or 0
         else:
-            code = getattr(item, 'account_code', '')
-            name = getattr(item, 'account_name', '')
+            code = str(getattr(item, 'account_code', '') or '').strip()
+            name = str(getattr(item, 'account_name', '') or '').strip()
             ptd_budget = getattr(item, 'ptd_budget', 0) or 0
             ptd_actual = getattr(item, 'ptd_actual', 0) or 0
 
-        if not code or 'TOTAL' in str(name).upper():
+        if not code or 'TOTAL' in name.upper():
             continue
 
         # Only expense accounts (5xxxxx-8xxxxx) with budget > $100 and no actual
@@ -114,13 +114,13 @@ def detect_budget_gaps(gl_data, budget_data) -> List[Dict[str, Any]]:
                 'account_name': name,
                 'budget_amount': abs(ptd_budget),
                 'source': 'budget_gap',
-                'description': f'Budget gap â {name} budgeted ${abs(ptd_budget):,.2f}, no GL activity',
+                'description': f'Budget gap — {name} budgeted ${abs(ptd_budget):,.2f}, no GL activity',
             })
 
     return candidates
 
 
-# ââ Layer 3: Historical pattern detection ââââââââââââââââââââ
+# ── Layer 3: Historical pattern detection ────────────────────
 
 def detect_historical_recurring(gl_data, budget_data) -> List[Dict[str, Any]]:
     """
@@ -181,13 +181,13 @@ def detect_historical_recurring(gl_data, budget_data) -> List[Dict[str, Any]]:
                 'ytd_prior': begin,
                 'months_prior': prior_months,
                 'source': 'historical',
-                'description': f'Recurring â {acct.account_name} avg ${est_monthly:,.0f}/mo ({prior_months} prior months), no activity this period',
+                'description': f'Recurring — {acct.account_name} avg ${est_monthly:,.0f}/mo ({prior_months} prior months), no activity this period',
             })
 
     return candidates
 
 
-# ââ Build JE lines from all sources âââââââââââââââââââââââââ
+# ── Build JE lines from all sources ─────────────────────────
 
 def build_accrual_entries(nexus_data: list, period: str = '',
                           property_name: str = '',
@@ -222,12 +222,12 @@ def build_accrual_entries(nexus_data: list, period: str = '',
     je_num = 1
 
     for inv in invoices:
-        vendor = inv.get('vendor', '')
-        inv_num = inv.get('invoice_number', '')
+        vendor = str(inv.get('vendor', '') or '')
+        inv_num = str(inv.get('invoice_number', '') or '')
         inv_date = inv.get('invoice_date', '')
-        gl_account = inv.get('gl_account', '')
-        gl_category = inv.get('gl_category', '')
-        description = inv.get('line_description', '')
+        gl_account = str(inv.get('gl_account', '') or '')
+        gl_category = str(inv.get('gl_category', '') or '')
+        description = str(inv.get('line_description', '') or '')
         amount = inv.get('amount', 0) or 0
 
         if amount == 0:
@@ -239,14 +239,14 @@ def build_accrual_entries(nexus_data: list, period: str = '',
         elif isinstance(inv_date, str):
             date_str = inv_date
         else:
-            date_str = ''
+            date_str = str(inv_date) if inv_date else ''
 
         # Build description for JE
-        je_desc = f"Accrual â {vendor}"
+        je_desc = f"Accrual — {vendor}"
         if inv_num:
             je_desc += f" #{inv_num}"
         if description:
-            je_desc += f" â {description[:50]}"
+            je_desc += f" — {description[:50]}"
 
         je_id = f"ACC-{je_num:04d}"
 
@@ -282,7 +282,7 @@ def build_accrual_entries(nexus_data: list, period: str = '',
 
         je_num += 1
 
-    # ââ Layer 2: Budget gap accruals ââ
+    # ── Layer 2: Budget gap accruals ──
     if gl_data and budget_data:
         budget_gaps = detect_budget_gaps(gl_data, budget_data)
         # Don't duplicate accounts already covered by Nexus
@@ -296,7 +296,7 @@ def build_accrual_entries(nexus_data: list, period: str = '',
                 continue
 
             je_id = f"BGA-{je_num:04d}"
-            je_desc = f"Budget gap accrual â {gap['account_name']}"
+            je_desc = f"Budget gap accrual — {gap['account_name']}"
 
             je_lines.append({
                 'je_number': je_id,
@@ -328,7 +328,7 @@ def build_accrual_entries(nexus_data: list, period: str = '',
             })
             je_num += 1
 
-    # ââ Layer 3: Historical recurring accruals ââ
+    # ── Layer 3: Historical recurring accruals ──
     if gl_data:
         historicals = detect_historical_recurring(gl_data, budget_data)
         covered_accounts = set()
@@ -341,7 +341,7 @@ def build_accrual_entries(nexus_data: list, period: str = '',
                 continue
 
             je_id = f"REC-{je_num:04d}"
-            je_desc = f"Recurring accrual â {hist['account_name']} (est. ${hist['estimated_amount']:,.0f}/mo)"
+            je_desc = f"Recurring accrual — {hist['account_name']} (est. ${hist['estimated_amount']:,.0f}/mo)"
 
             je_lines.append({
                 'je_number': je_id,
@@ -376,7 +376,7 @@ def build_accrual_entries(nexus_data: list, period: str = '',
     return je_lines
 
 
-# ââ Generate Yardi JE import file ââââââââââââââââââââââââââââ
+# ── Generate Yardi JE import file ────────────────────────────
 
 def generate_yardi_je_import(je_lines: List[Dict], output_path: str,
                               period: str = '', property_name: str = '') -> str:
@@ -469,7 +469,7 @@ def generate_yardi_je_import(je_lines: List[Dict], output_path: str,
     return output_path
 
 
-# ââ Add review tab to workpapers âââââââââââââââââââââââââââââ
+# ── Add review tab to workpapers ─────────────────────────────
 
 def write_accrual_entries_workpaper_tab(wb: Workbook, je_lines: List[Dict],
                                          period: str = '', property_name: str = ''):
@@ -487,7 +487,7 @@ def write_accrual_entries_workpaper_tab(wb: Workbook, je_lines: List[Dict],
 
     # Title
     row = 1
-    c = ws.cell(row=row, column=1, value=f'Accrual Journal Entries â {property_name}')
+    c = ws.cell(row=row, column=1, value=f'Accrual Journal Entries — {property_name}')
     c.font = Font(name='Calibri', size=14, bold=True, color=DARK_BLUE)
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=9)
     row += 1
