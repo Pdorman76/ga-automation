@@ -178,7 +178,7 @@ def _write_bank_recon_workpaper(wb, engine_result):
     bank_check_amounts = {}
     for chk in bank_checks:
         amt = chk.get('amount', 0)
-        num = chk.get('check_number', chk.get('number', ''))
+        num = str(chk.get('check_number', chk.get('number', '')) or '')
         key = f"{amt:.2f}"
         if key not in bank_check_amounts:
             bank_check_amounts[key] = []
@@ -428,8 +428,8 @@ def _write_debt_service_workpaper(wb, engine_result):
     total_interest_ytd = 0
     for i, loan in enumerate(loans):
         if isinstance(loan, dict):
-            ln = loan.get('loan_number', '')
-            name = loan.get('property_name', '')
+            ln = str(loan.get('loan_number', '') or '')
+            name = str(loan.get('property_name', '') or '')
             rate = loan.get('interest_rate', 0)
             principal = loan.get('principal_balance', 0) or 0
             int_ytd = loan.get('interest_paid_ytd', 0) or 0
@@ -437,8 +437,8 @@ def _write_debt_service_workpaper(wb, engine_result):
             ins_esc = loan.get('insurance_escrow_balance', 0) or 0
             reserve = loan.get('reserve_balance', 0) or 0
         else:
-            ln = getattr(loan, 'loan_number', '')
-            name = getattr(loan, 'property_name', '')
+            ln = str(getattr(loan, 'loan_number', '') or '')
+            name = str(getattr(loan, 'property_name', '') or '')
             rate = getattr(loan, 'interest_rate', 0)
             principal = getattr(loan, 'principal_balance', 0) or 0
             int_ytd = getattr(loan, 'interest_paid_ytd', 0) or 0
@@ -492,11 +492,11 @@ def _write_debt_service_workpaper(wb, engine_result):
 
     for i, loan in enumerate(loans):
         if isinstance(loan, dict):
-            ln = loan.get('loan_number', '')
+            ln = str(loan.get('loan_number', '') or '')
             pmt = loan.get('payment_breakdown', {})
             due_date = loan.get('payment_due_date', '')
         else:
-            ln = getattr(loan, 'loan_number', '')
+            ln = str(getattr(loan, 'loan_number', '') or '')
             pmt = getattr(loan, 'payment_breakdown', {})
             due_date = getattr(loan, 'payment_due_date', '')
 
@@ -613,9 +613,9 @@ def _write_rent_roll_workpaper(wb, engine_result):
 
     for i, t in enumerate(tenants):
         if isinstance(t, dict):
-            unit = t.get('units', t.get('unit', ''))
-            tenant = t.get('tenant', t.get('lease', ''))
-            ltype = t.get('lease_type', '')
+            unit = str(t.get('units', t.get('unit', '')) or '')
+            tenant = str(t.get('tenant', t.get('lease', '')) or '')
+            ltype = str(t.get('lease_type', '') or '')
             area = t.get('area', 0) or 0
             lfrom = t.get('lease_from', '')
             lto = t.get('lease_to', '')
@@ -623,9 +623,9 @@ def _write_rent_roll_workpaper(wb, engine_result):
             annual = t.get('annual_rent', 0) or 0
             rent_psf = t.get('annual_rent_per_area', 0) or 0
         else:
-            unit = getattr(t, 'units', getattr(t, 'unit', ''))
-            tenant = getattr(t, 'tenant', '')
-            ltype = getattr(t, 'lease_type', '')
+            unit = str(getattr(t, 'units', getattr(t, 'unit', '')) or '')
+            tenant = str(getattr(t, 'tenant', '') or '')
+            ltype = str(getattr(t, 'lease_type', '') or '')
             area = getattr(t, 'area', 0) or 0
             lfrom = getattr(t, 'lease_from', '')
             lto = getattr(t, 'lease_to', '')
@@ -893,7 +893,7 @@ def _write_accrual_workpaper(wb, engine_result):
     # Count by status
     status_counts = {}
     for inv in invoices:
-        s = inv.get('invoice_status', '') if isinstance(inv, dict) else getattr(inv, 'invoice_status', '')
+        s = str(inv.get('invoice_status', '') if isinstance(inv, dict) else getattr(inv, 'invoice_status', '') or '')
         status_counts[s] = status_counts.get(s, 0) + 1
 
     for status, amt in sorted(status_totals.items()):
