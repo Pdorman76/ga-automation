@@ -106,6 +106,16 @@ def _kv_row(ws, row, label, value, fmt=None, label_col=1, val_col=2):
         c2.number_format = fmt
  
  
+def _safe_float(val, default=0):
+    """Convert val to float, returning default for any non-numeric input."""
+    if val is None or val == '':
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+ 
+ 
 def _auto_width(ws, max_cols, min_width=10, max_width=50):
     for col in range(1, max_cols + 1):
         letter = get_column_letter(col)
@@ -157,8 +167,8 @@ def _write_bank_recon_workpaper(wb, engine_result):
     bank_wires = []
  
     if bank_data and isinstance(bank_data, dict):
-        bank_end = float(bank_data.get('ending_balance', 0) or 0)
-        bank_begin = float(bank_data.get('beginning_balance', 0) or 0)
+        bank_end = _safe_float(bank_data.get('ending_balance', 0) or 0)
+        bank_begin = _safe_float(bank_data.get('beginning_balance', 0) or 0)
         bank_checks = bank_data.get('checks', [])
         bank_deposits = bank_data.get('deposits', [])
         bank_ach = bank_data.get('ach_debits', [])
@@ -177,7 +187,7 @@ def _write_bank_recon_workpaper(wb, engine_result):
     # Build set of bank cleared check amounts for matching
     bank_check_amounts = {}
     for chk in bank_checks:
-        amt = float(chk.get('amount', 0) or 0)
+        amt = _safe_float(chk.get('amount', 0) or 0)
         num = str(chk.get('check_number', chk.get('number', '')) or '')
         key = f"{amt:.2f}"
         if key not in bank_check_amounts:
@@ -208,7 +218,7 @@ def _write_bank_recon_workpaper(wb, engine_result):
  
     bank_deposit_amounts = {}
     for dep in bank_deposits:
-        amt = float(dep.get('amount', 0) or 0)
+        amt = _safe_float(dep.get('amount', 0) or 0)
         key = f"{amt:.2f}"
         if key not in bank_deposit_amounts:
             bank_deposit_amounts[key] = []
@@ -430,21 +440,21 @@ def _write_debt_service_workpaper(wb, engine_result):
         if isinstance(loan, dict):
             ln = str(loan.get('loan_number', '') or '')
             name = str(loan.get('property_name', '') or '')
-            rate = float(loan.get('interest_rate', 0) or 0)
-            principal = float(loan.get('principal_balance', 0) or 0)
-            int_ytd = float(loan.get('interest_paid_ytd', 0) or 0)
-            tax_esc = float(loan.get('tax_escrow_balance', 0) or 0)
-            ins_esc = float(loan.get('insurance_escrow_balance', 0) or 0)
-            reserve = float(loan.get('reserve_balance', 0) or 0)
+            rate = _safe_float(loan.get('interest_rate', 0) or 0)
+            principal = _safe_float(loan.get('principal_balance', 0) or 0)
+            int_ytd = _safe_float(loan.get('interest_paid_ytd', 0) or 0)
+            tax_esc = _safe_float(loan.get('tax_escrow_balance', 0) or 0)
+            ins_esc = _safe_float(loan.get('insurance_escrow_balance', 0) or 0)
+            reserve = _safe_float(loan.get('reserve_balance', 0) or 0)
         else:
             ln = str(getattr(loan, 'loan_number', '') or '')
             name = str(getattr(loan, 'property_name', '') or '')
-            rate = float(getattr(loan, 'interest_rate', 0) or 0)
-            principal = float(getattr(loan, 'principal_balance', 0) or 0)
-            int_ytd = float(getattr(loan, 'interest_paid_ytd', 0) or 0)
-            tax_esc = float(getattr(loan, 'tax_escrow_balance', 0) or 0)
-            ins_esc = float(getattr(loan, 'insurance_escrow_balance', 0) or 0)
-            reserve = float(getattr(loan, 'reserve_balance', 0) or 0)
+            rate = _safe_float(getattr(loan, 'interest_rate', 0) or 0)
+            principal = _safe_float(getattr(loan, 'principal_balance', 0) or 0)
+            int_ytd = _safe_float(getattr(loan, 'interest_paid_ytd', 0) or 0)
+            tax_esc = _safe_float(getattr(loan, 'tax_escrow_balance', 0) or 0)
+            ins_esc = _safe_float(getattr(loan, 'insurance_escrow_balance', 0) or 0)
+            reserve = _safe_float(getattr(loan, 'reserve_balance', 0) or 0)
  
         alt = i % 2 == 1
         ws.cell(row=row, column=1, value=ln); _apply(ws.cell(row=row, column=1), _cell(alt))
@@ -501,12 +511,12 @@ def _write_debt_service_workpaper(wb, engine_result):
             due_date = getattr(loan, 'payment_due_date', '')
  
         if isinstance(pmt, dict):
-            p_amt = float(pmt.get('principal', 0) or 0)
-            i_amt = float(pmt.get('interest', 0) or 0)
-            t_amt = float(pmt.get('taxes', 0) or 0)
-            ins_amt = float(pmt.get('insurance', 0) or 0)
-            r_amt = float(pmt.get('reserves', 0) or 0)
-            total = float(pmt.get('total_payment_due', 0) or 0) or (p_amt + i_amt + t_amt + ins_amt + r_amt)
+            p_amt = _safe_float(pmt.get('principal', 0) or 0)
+            i_amt = _safe_float(pmt.get('interest', 0) or 0)
+            t_amt = _safe_float(pmt.get('taxes', 0) or 0)
+            ins_amt = _safe_float(pmt.get('insurance', 0) or 0)
+            r_amt = _safe_float(pmt.get('reserves', 0) or 0)
+            total = _safe_float(pmt.get('total_payment_due', 0) or 0) or (p_amt + i_amt + t_amt + ins_amt + r_amt)
         else:
             p_amt = i_amt = t_amt = ins_amt = r_amt = total = 0
  
@@ -533,8 +543,8 @@ def _write_debt_service_workpaper(wb, engine_result):
     _section_header(ws, row, 1, 4, 'C. GL to Loan Statement Reconciliation')
     row += 1
  
-    gl_interest = float(ds_check.get('gl_interest_expense', 0) or 0)
-    loan_interest = float(ds_check.get('loan_interest_total', 0) or 0)
+    gl_interest = _safe_float(ds_check.get('gl_interest_expense', 0) or 0)
+    loan_interest = _safe_float(ds_check.get('loan_interest_total', 0) or 0)
  
     # Get GL principal payment (account 201100 or similar mortgage payable)
     gl_principal_payment = 0
@@ -616,22 +626,22 @@ def _write_rent_roll_workpaper(wb, engine_result):
             unit = str(t.get('units', t.get('unit', '')) or '')
             tenant = str(t.get('tenant', t.get('lease', '')) or '')
             ltype = str(t.get('lease_type', '') or '')
-            area = float(t.get('area', 0) or 0)
+            area = _safe_float(t.get('area', 0) or 0)
             lfrom = t.get('lease_from', '')
             lto = t.get('lease_to', '')
-            monthly = float(t.get('monthly_rent', 0) or 0)
-            annual = float(t.get('annual_rent', 0) or 0)
-            rent_psf = float(t.get('annual_rent_per_area', 0) or 0)
+            monthly = _safe_float(t.get('monthly_rent', 0) or 0)
+            annual = _safe_float(t.get('annual_rent', 0) or 0)
+            rent_psf = _safe_float(t.get('annual_rent_per_area', 0) or 0)
         else:
             unit = str(getattr(t, 'units', getattr(t, 'unit', '')) or '')
             tenant = str(getattr(t, 'tenant', '') or '')
             ltype = str(getattr(t, 'lease_type', '') or '')
-            area = float(getattr(t, 'area', 0) or 0)
+            area = _safe_float(getattr(t, 'area', 0) or 0)
             lfrom = getattr(t, 'lease_from', '')
             lto = getattr(t, 'lease_to', '')
-            monthly = float(getattr(t, 'monthly_rent', 0) or 0)
-            annual = float(getattr(t, 'annual_rent', 0) or 0)
-            rent_psf = float(getattr(t, 'annual_rent_per_area', 0) or 0)
+            monthly = _safe_float(getattr(t, 'monthly_rent', 0) or 0)
+            annual = _safe_float(getattr(t, 'annual_rent', 0) or 0)
+            rent_psf = _safe_float(getattr(t, 'annual_rent_per_area', 0) or 0)
  
         alt = i % 2 == 1
         ws.cell(row=row, column=1, value=unit); _apply(ws.cell(row=row, column=1), _cell(alt))
@@ -778,7 +788,7 @@ def _write_accrual_workpaper(wb, engine_result):
         gl_cat = str(inv.get('gl_category', '') if isinstance(inv, dict) else getattr(inv, 'gl_category', '') or '')
         desc = str(inv.get('line_description', '') if isinstance(inv, dict) else getattr(inv, 'line_description', '') or '')
         status = str(inv.get('invoice_status', '') if isinstance(inv, dict) else getattr(inv, 'invoice_status', '') or '')
-        amount = float(inv.get('amount', 0) if isinstance(inv, dict) else getattr(inv, 'amount', 0) or 0)
+        amount = _safe_float(inv.get('amount', 0) if isinstance(inv, dict) else getattr(inv, 'amount', 0) or 0)
         amount = amount or 0
  
         # Calculate days outstanding
