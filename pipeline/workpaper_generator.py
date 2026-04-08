@@ -6,25 +6,25 @@ Produces institutional-grade workpapers for month-end close:
   2. Debt Service Schedule — P&I breakout, escrow recon, payment detail
   3. Rent Roll Tie-Out — Lease-level billed vs collected vs GL revenue
   4. Accrual Schedule — Invoice aging, vendor detail, accrued vs paid
- 
+
 Each tab is formatted as a standalone workpaper suitable for
 inclusion in a Singerman close binder.
 """
- 
+
 import os
 from datetime import datetime, date, timedelta
 from typing import Optional, List, Dict, Any
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, numbers
 from openpyxl.utils import get_column_letter
- 
+
 from accrual_entry_generator import (
     build_accrual_entries, write_accrual_entries_workpaper_tab
 )
- 
- 
+
+
 # ── Styling ──────────────────────────────────────────────────
- 
+
 DARK_BLUE = '1F4E78'
 MED_BLUE = '2E75B6'
 LIGHT_BLUE = 'D6E4F0'
@@ -33,15 +33,15 @@ WHITE = 'FFFFFF'
 GREEN_LIGHT = 'E2EFDA'
 RED_LIGHT = 'FFC7CE'
 AMBER_LIGHT = 'FFEB9C'
- 
+
 THIN_BORDER = Border(
     left=Side(style='thin'), right=Side(style='thin'),
     top=Side(style='thin'), bottom=Side(style='thin'),
 )
 BOTTOM_BORDER = Border(bottom=Side(style='medium'))
 DOUBLE_BOTTOM = Border(bottom=Side(style='double'))
- 
- 
+
+
 def _hdr(bold=True, size=11, color='FFFFFF', fill_color=DARK_BLUE, align='center'):
     return {
         'font': Font(name='Calibri', size=size, bold=bold, color=color),
@@ -49,8 +49,8 @@ def _hdr(bold=True, size=11, color='FFFFFF', fill_color=DARK_BLUE, align='center
         'alignment': Alignment(horizontal=align, vertical='center', wrap_text=True),
         'border': THIN_BORDER,
     }
- 
- 
+
+
 def _cell(alt=False, fmt=None, bold=False, align='left'):
     fill = LIGHT_GRAY if alt else WHITE
     style = {
@@ -62,16 +62,16 @@ def _cell(alt=False, fmt=None, bold=False, align='left'):
     if fmt:
         style['number_format'] = fmt
     return style
- 
- 
+
+
 def _apply(cell, style):
     for attr in ('font', 'fill', 'alignment', 'border'):
         if attr in style:
             setattr(cell, attr, style[attr])
     if 'number_format' in style:
         cell.number_format = style['number_format']
- 
- 
+
+
 def _section_header(ws, row, col_start, col_end, text, fill=MED_BLUE):
     """Write a section header spanning columns."""
     c = ws.cell(row=row, column=col_start, value=text)
@@ -82,20 +82,20 @@ def _section_header(ws, row, col_start, col_end, text, fill=MED_BLUE):
         ws.merge_cells(start_row=row, start_column=col_start, end_row=row, end_column=col_end)
     for col in range(col_start, col_end + 1):
         ws.cell(row=row, column=col).border = THIN_BORDER
- 
- 
+
+
 def _title_row(ws, row, text, cols=8):
     c = ws.cell(row=row, column=1, value=text)
     c.font = Font(name='Calibri', size=14, bold=True, color=DARK_BLUE)
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=cols)
- 
- 
+
+
 def _subtitle_row(ws, row, text, cols=8):
     c = ws.cell(row=row, column=1, value=text)
     c.font = Font(name='Calibri', size=11, italic=True, color='666666')
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=cols)
- 
- 
+
+
 def _kv_row(ws, row, label, value, fmt=None, label_col=1, val_col=2):
     """Write a label-value pair."""
     c1 = ws.cell(row=row, column=label_col, value=label)
@@ -104,18 +104,8 @@ def _kv_row(ws, row, label, value, fmt=None, label_col=1, val_col=2):
     c2.font = Font(name='Calibri', size=11)
     if fmt:
         c2.number_format = fmt
- 
- 
-def _safe_float(val, default=0):
-    """Convert val to float, returning default for any non-numeric input."""
-    if val is None or val == '':
-        return default
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return default
- 
- 
+
+
 def _auto_width(ws, max_cols, min_width=10, max_width=50):
     for col in range(1, max_cols + 1):
         letter = get_column_letter(col)
@@ -127,10 +117,10 @@ def _auto_width(ws, max_cols, min_width=10, max_width=50):
             except:
                 pass
         ws.column_dimensions[letter].width = min(best, max_width)
- 
- 
+
+
 # ── 1. BANK RECONCILIATION ──────────────────────────────────
- 
+
 def _write_bank_recon_workpaper(wb, engine_result):
     """
     Bank reconciliation workpaper:
@@ -142,115 +132,62 @@ def _write_bank_recon_workpaper(wb, engine_result):
       - Section E: Cleared check detail
     """
     ws = wb.create_sheet('Bank Recon')
- 
-    gl_data = engine_result.parsed.get('gl')
-    bank_data = engine_result.parsed.get('pnc_bank')
+
     period = engine_result.period or 'N/A'
     prop = engine_result.property_name or 'N/A'
- 
-    # Get GL cash account 111100
-    gl_cash = None
-    if gl_data and hasattr(gl_data, 'accounts'):
-        for acct in gl_data.accounts:
-            if acct.account_code == '111100':
-                gl_cash = acct
-                break
- 
-    gl_end = gl_cash.ending_balance if gl_cash else 0
-    gl_begin = gl_cash.beginning_balance if gl_cash else 0
- 
-    bank_end = 0
-    bank_begin = 0
-    bank_checks = []
-    bank_deposits = []
-    bank_ach = []
-    bank_wires = []
- 
-    if bank_data and isinstance(bank_data, dict):
-        bank_end = _safe_float(bank_data.get('ending_balance', 0) or 0)
-        bank_begin = _safe_float(bank_data.get('beginning_balance', 0) or 0)
-        bank_checks = bank_data.get('checks', [])
-        bank_deposits = bank_data.get('deposits', [])
-        bank_ach = bank_data.get('ach_debits', [])
-        bank_wires = bank_data.get('wire_transfers', [])
- 
-    # ── Build outstanding checks list ──
-    # GL check transactions = control starts with K- or P- (check payments)
-    # that are NOT matched to bank cleared checks by amount
-    gl_check_txns = []
-    if gl_cash and hasattr(gl_cash, 'transactions'):
-        for txn in gl_cash.transactions:
-            ctrl = (txn.control or '').strip()
-            if ctrl.startswith(('K-', 'P-')) and txn.credit > 0:
-                gl_check_txns.append(txn)
- 
-    # Build set of bank cleared check amounts for matching
-    bank_check_amounts = {}
-    for chk in bank_checks:
-        amt = _safe_float(chk.get('amount', 0) or 0)
-        num = str(chk.get('check_number', chk.get('number', '')) or '')
-        key = f"{amt:.2f}"
-        if key not in bank_check_amounts:
-            bank_check_amounts[key] = []
-        bank_check_amounts[key].append(chk)
- 
-    outstanding_checks = []
-    cleared_gl_checks = []
-    for txn in gl_check_txns:
-        key = f"{txn.credit:.2f}"
-        if key in bank_check_amounts and bank_check_amounts[key]:
-            # Matched — this check cleared
-            matched_chk = bank_check_amounts[key].pop(0)
-            cleared_gl_checks.append((txn, matched_chk))
-        else:
-            # Outstanding — in GL but not on bank statement
-            outstanding_checks.append(txn)
- 
-    total_outstanding = sum(t.credit for t in outstanding_checks)
- 
-    # ── Deposits in transit ──
-    # GL debit entries to cash that don't match bank deposits
-    gl_deposit_txns = []
-    if gl_cash and hasattr(gl_cash, 'transactions'):
-        for txn in gl_cash.transactions:
-            if txn.debit > 0:
-                gl_deposit_txns.append(txn)
- 
-    bank_deposit_amounts = {}
-    for dep in bank_deposits:
-        amt = _safe_float(dep.get('amount', 0) or 0)
-        key = f"{amt:.2f}"
-        if key not in bank_deposit_amounts:
-            bank_deposit_amounts[key] = []
-        bank_deposit_amounts[key].append(dep)
- 
-    deposits_in_transit = []
-    for txn in gl_deposit_txns:
-        key = f"{txn.debit:.2f}"
-        if key in bank_deposit_amounts and bank_deposit_amounts[key]:
-            bank_deposit_amounts[key].pop(0)
-        else:
-            deposits_in_transit.append(txn)
- 
-    total_dit = sum(t.debit for t in deposits_in_transit)
- 
+    recon = engine_result.bank_recon_detail
+
+    # Use precomputed recon from engine (single source of truth)
+    if recon:
+        gl_end = recon.gl_ending
+        gl_begin = recon.gl_beginning
+        bank_end = recon.bank_ending
+        bank_begin = recon.bank_beginning
+        outstanding_checks = recon.outstanding_checks
+        total_outstanding = recon.total_outstanding_checks
+        deposits_in_transit = recon.deposits_in_transit
+        total_dit = recon.total_deposits_in_transit
+        matched_checks = recon.matched_checks
+        matched_ach = recon.matched_ach
+        matched_deposits = recon.matched_deposits
+    else:
+        # Fallback: no bank recon computed (bank data was missing)
+        gl_data = engine_result.parsed.get('gl')
+        gl_cash = None
+        if gl_data and hasattr(gl_data, 'accounts'):
+            for acct in gl_data.accounts:
+                if acct.account_code == '111100':
+                    gl_cash = acct
+                    break
+        gl_end = gl_cash.ending_balance if gl_cash else 0
+        gl_begin = gl_cash.beginning_balance if gl_cash else 0
+        bank_end = 0
+        bank_begin = 0
+        outstanding_checks = []
+        total_outstanding = 0
+        deposits_in_transit = []
+        total_dit = 0
+        matched_checks = []
+        matched_ach = []
+        matched_deposits = []
+
     # ── Write workpaper ──
     row = 1
     _title_row(ws, row, f'Bank Reconciliation — {prop}')
     row += 1
     _subtitle_row(ws, row, f'Period: {period}  |  GL Account: 111100 Cash-Operating  |  Prepared: {datetime.now().strftime("%m/%d/%Y")}')
     row += 2
- 
+
     # Section A: Balance Comparison
     _section_header(ws, row, 1, 4, 'A. Balance Comparison')
     row += 1
- 
+
     headers_a = ['', 'GL (Book)', 'Bank Statement', 'Variance']
     for ci, h in enumerate(headers_a, 1):
         c = ws.cell(row=row, column=ci, value=h)
         _apply(c, _hdr(fill_color=LIGHT_BLUE, color='000000', align='center'))
     row += 1
- 
+
     balance_rows = [
         ('Beginning Balance', gl_begin, bank_begin),
         ('Ending Balance', gl_end, bank_end),
@@ -271,20 +208,20 @@ def _write_bank_recon_workpaper(wb, engine_result):
         if abs(var) > 0.01:
             c4.font = Font(name='Calibri', size=11, color='FF0000')
         row += 1
- 
+
     row += 1
- 
+
     # Section B: Outstanding Checks
     _section_header(ws, row, 1, 6, f'B. Outstanding Checks ({len(outstanding_checks)} items, Total: ${total_outstanding:,.2f})')
     row += 1
- 
+
     if outstanding_checks:
         oc_headers = ['Date', 'Control #', 'Description', 'Reference', 'Amount']
         for ci, h in enumerate(oc_headers, 1):
             c = ws.cell(row=row, column=ci, value=h)
             _apply(c, _hdr(fill_color=LIGHT_BLUE, color='000000'))
         row += 1
- 
+
         for i, txn in enumerate(outstanding_checks):
             alt = i % 2 == 1
             dt = txn.date.strftime('%m/%d/%Y') if txn.date else ''
@@ -299,7 +236,7 @@ def _write_bank_recon_workpaper(wb, engine_result):
             ws.cell(row=row, column=5, value=txn.credit)
             _apply(ws.cell(row=row, column=5), _cell(alt, fmt='$#,##0.00'))
             row += 1
- 
+
         # Total row
         ws.cell(row=row, column=4, value='Total Outstanding').font = Font(name='Calibri', size=11, bold=True)
         c = ws.cell(row=row, column=5, value=total_outstanding)
@@ -310,20 +247,20 @@ def _write_bank_recon_workpaper(wb, engine_result):
     else:
         ws.cell(row=row, column=1, value='No outstanding checks identified').font = Font(name='Calibri', size=11, italic=True)
         row += 1
- 
+
     row += 1
- 
+
     # Section C: Deposits in Transit
     _section_header(ws, row, 1, 6, f'C. Deposits in Transit ({len(deposits_in_transit)} items, Total: ${total_dit:,.2f})')
     row += 1
- 
+
     if deposits_in_transit:
         dit_headers = ['Date', 'Control #', 'Description', 'Reference', 'Amount']
         for ci, h in enumerate(dit_headers, 1):
             c = ws.cell(row=row, column=ci, value=h)
             _apply(c, _hdr(fill_color=LIGHT_BLUE, color='000000'))
         row += 1
- 
+
         for i, txn in enumerate(deposits_in_transit):
             alt = i % 2 == 1
             dt = txn.date.strftime('%m/%d/%Y') if txn.date else ''
@@ -338,7 +275,7 @@ def _write_bank_recon_workpaper(wb, engine_result):
             ws.cell(row=row, column=5, value=txn.debit)
             _apply(ws.cell(row=row, column=5), _cell(alt, fmt='$#,##0.00'))
             row += 1
- 
+
         ws.cell(row=row, column=4, value='Total In Transit').font = Font(name='Calibri', size=11, bold=True)
         c = ws.cell(row=row, column=5, value=total_dit)
         c.number_format = '$#,##0.00'
@@ -348,15 +285,15 @@ def _write_bank_recon_workpaper(wb, engine_result):
     else:
         ws.cell(row=row, column=1, value='No deposits in transit identified').font = Font(name='Calibri', size=11, italic=True)
         row += 1
- 
+
     row += 1
- 
+
     # Section D: Adjusted Balance Tie-Out
     _section_header(ws, row, 1, 4, 'D. Adjusted Balance Tie-Out')
     row += 1
- 
+
     adjusted_bank = bank_end - total_outstanding + total_dit
- 
+
     tieout_rows = [
         ('Bank Ending Balance', bank_end),
         ('Less: Outstanding Checks', -total_outstanding),
@@ -367,7 +304,7 @@ def _write_bank_recon_workpaper(wb, engine_result):
         ('', None),
         ('Reconciling Difference', gl_end - adjusted_bank),
     ]
- 
+
     for label, val in tieout_rows:
         if val is None:
             row += 1
@@ -385,15 +322,59 @@ def _write_bank_recon_workpaper(wb, engine_result):
             c2.font = Font(name='Calibri', size=11, bold=True, color='FF0000' if abs(val) > 0.01 else '008000')
             c2.border = DOUBLE_BOTTOM
         row += 1
- 
+
+    row += 1
+
+    # Section E: Matched Items Detail (audit trail with confidence levels)
+    if matched_checks or matched_ach or matched_deposits:
+        _section_header(ws, row, 1, 6, f'E. Matched Items Detail ({len(matched_checks)} checks, {len(matched_ach)} ACH, {len(matched_deposits)} deposits)')
+        row += 1
+
+        match_headers = ['Type', 'Date', 'GL Control/Desc', 'Amount', 'Bank Ref', 'Match Method']
+        for ci, h in enumerate(match_headers, 1):
+            c = ws.cell(row=row, column=ci, value=h)
+            _apply(c, _hdr(fill_color=LIGHT_BLUE, color='000000'))
+        row += 1
+
+        all_matched = (
+            [('Check', m) for m in matched_checks] +
+            [('ACH', m) for m in matched_ach] +
+            [('Deposit', m) for m in matched_deposits]
+        )
+
+        for i, (mtype, m) in enumerate(all_matched):
+            alt = i % 2 == 1
+            gl_txn = m['gl_txn']
+            bk = m['bank_item']
+            match_method = m.get('match_type', 'unknown')
+
+            dt = gl_txn.date.strftime('%m/%d/%Y') if gl_txn.date else ''
+            gl_ref = gl_txn.control or gl_txn.description or ''
+            amt = gl_txn.credit if gl_txn.credit > 0 else gl_txn.debit
+            bk_ref = bk.get('check_number', bk.get('reference', bk.get('description', '')))[:30]
+
+            ws.cell(row=row, column=1, value=mtype)
+            _apply(ws.cell(row=row, column=1), _cell(alt))
+            ws.cell(row=row, column=2, value=dt)
+            _apply(ws.cell(row=row, column=2), _cell(alt))
+            ws.cell(row=row, column=3, value=gl_ref[:40])
+            _apply(ws.cell(row=row, column=3), _cell(alt))
+            ws.cell(row=row, column=4, value=amt)
+            _apply(ws.cell(row=row, column=4), _cell(alt, fmt='$#,##0.00'))
+            ws.cell(row=row, column=5, value=bk_ref)
+            _apply(ws.cell(row=row, column=5), _cell(alt))
+            ws.cell(row=row, column=6, value=match_method)
+            _apply(ws.cell(row=row, column=6), _cell(alt))
+            row += 1
+
     _auto_width(ws, 6)
     ws.column_dimensions['A'].width = 25
     ws.column_dimensions['C'].width = 30
     ws.sheet_properties.tabColor = '2E75B6'
- 
- 
+
+
 # ── 2. DEBT SERVICE SCHEDULE ────────────────────────────────
- 
+
 def _write_debt_service_workpaper(wb, engine_result):
     """
     Debt service workpaper:
@@ -404,62 +385,62 @@ def _write_debt_service_workpaper(wb, engine_result):
       - Section D: GL to loan statement tie-out
     """
     ws = wb.create_sheet('Debt Service')
- 
+
     gl_data = engine_result.parsed.get('gl')
     loan_data = engine_result.parsed.get('loan')
     ds_check = engine_result.debt_service_check or {}
     period = engine_result.period or 'N/A'
     prop = engine_result.property_name or 'N/A'
- 
+
     loans = []
     if isinstance(loan_data, list):
         loans = loan_data
     elif isinstance(loan_data, dict):
         loans = loan_data.get('loans', [])
- 
+
     row = 1
     _title_row(ws, row, f'Debt Service Schedule — {prop}', cols=10)
     row += 1
     _subtitle_row(ws, row, f'Period: {period}  |  Prepared: {datetime.now().strftime("%m/%d/%Y")}', cols=10)
     row += 2
- 
+
     # Section A: Loan Summary
     _section_header(ws, row, 1, 8, f'A. Loan Summary ({len(loans)} loans)')
     row += 1
- 
+
     loan_headers = ['Loan #', 'Property/Note', 'Interest Rate', 'Principal Balance',
                     'Interest Paid YTD', 'Tax Escrow', 'Insurance Escrow', 'Reserve Balance']
     for ci, h in enumerate(loan_headers, 1):
         c = ws.cell(row=row, column=ci, value=h)
         _apply(c, _hdr(fill_color=LIGHT_BLUE, color='000000'))
     row += 1
- 
+
     total_principal = 0
     total_interest_ytd = 0
     for i, loan in enumerate(loans):
         if isinstance(loan, dict):
-            ln = str(loan.get('loan_number', '') or '')
-            name = str(loan.get('property_name', '') or '')
-            rate = _safe_float(loan.get('interest_rate', 0) or 0)
-            principal = _safe_float(loan.get('principal_balance', 0) or 0)
-            int_ytd = _safe_float(loan.get('interest_paid_ytd', 0) or 0)
-            tax_esc = _safe_float(loan.get('tax_escrow_balance', 0) or 0)
-            ins_esc = _safe_float(loan.get('insurance_escrow_balance', 0) or 0)
-            reserve = _safe_float(loan.get('reserve_balance', 0) or 0)
+            ln = loan.get('loan_number', '')
+            name = loan.get('property_name', '')
+            rate = loan.get('interest_rate', 0)
+            principal = loan.get('principal_balance', 0) or 0
+            int_ytd = loan.get('interest_paid_ytd', 0) or 0
+            tax_esc = loan.get('tax_escrow_balance', 0) or 0
+            ins_esc = loan.get('insurance_escrow_balance', 0) or 0
+            reserve = loan.get('reserve_balance', 0) or 0
         else:
-            ln = str(getattr(loan, 'loan_number', '') or '')
-            name = str(getattr(loan, 'property_name', '') or '')
-            rate = _safe_float(getattr(loan, 'interest_rate', 0) or 0)
-            principal = _safe_float(getattr(loan, 'principal_balance', 0) or 0)
-            int_ytd = _safe_float(getattr(loan, 'interest_paid_ytd', 0) or 0)
-            tax_esc = _safe_float(getattr(loan, 'tax_escrow_balance', 0) or 0)
-            ins_esc = _safe_float(getattr(loan, 'insurance_escrow_balance', 0) or 0)
-            reserve = _safe_float(getattr(loan, 'reserve_balance', 0) or 0)
- 
+            ln = getattr(loan, 'loan_number', '')
+            name = getattr(loan, 'property_name', '')
+            rate = getattr(loan, 'interest_rate', 0)
+            principal = getattr(loan, 'principal_balance', 0) or 0
+            int_ytd = getattr(loan, 'interest_paid_ytd', 0) or 0
+            tax_esc = getattr(loan, 'tax_escrow_balance', 0) or 0
+            ins_esc = getattr(loan, 'insurance_escrow_balance', 0) or 0
+            reserve = getattr(loan, 'reserve_balance', 0) or 0
+
         alt = i % 2 == 1
         ws.cell(row=row, column=1, value=ln); _apply(ws.cell(row=row, column=1), _cell(alt))
         ws.cell(row=row, column=2, value=name); _apply(ws.cell(row=row, column=2), _cell(alt))
- 
+
         rate_val = rate
         if isinstance(rate, (int, float)) and rate < 1:
             rate_val = rate  # already decimal
@@ -467,17 +448,17 @@ def _write_debt_service_workpaper(wb, engine_result):
             rate_val = rate / 100 if rate > 1 else rate
         ws.cell(row=row, column=3, value=rate_val)
         _apply(ws.cell(row=row, column=3), _cell(alt, fmt='0.000%'))
- 
+
         ws.cell(row=row, column=4, value=principal); _apply(ws.cell(row=row, column=4), _cell(alt, fmt='$#,##0.00'))
         ws.cell(row=row, column=5, value=int_ytd); _apply(ws.cell(row=row, column=5), _cell(alt, fmt='$#,##0.00'))
         ws.cell(row=row, column=6, value=tax_esc); _apply(ws.cell(row=row, column=6), _cell(alt, fmt='$#,##0.00'))
         ws.cell(row=row, column=7, value=ins_esc); _apply(ws.cell(row=row, column=7), _cell(alt, fmt='$#,##0.00'))
         ws.cell(row=row, column=8, value=reserve); _apply(ws.cell(row=row, column=8), _cell(alt, fmt='$#,##0.00'))
- 
+
         total_principal += principal
         total_interest_ytd += int_ytd
         row += 1
- 
+
     # Totals row
     ws.cell(row=row, column=2, value='TOTAL').font = Font(name='Calibri', size=11, bold=True)
     ws.cell(row=row, column=4, value=total_principal)
@@ -489,37 +470,44 @@ def _write_debt_service_workpaper(wb, engine_result):
     ws.cell(row=row, column=5).font = Font(name='Calibri', size=11, bold=True)
     ws.cell(row=row, column=5).border = DOUBLE_BOTTOM
     row += 2
- 
+
     # Section B: Payment Detail
     _section_header(ws, row, 1, 8, 'B. Payment Breakdown by Loan')
     row += 1
- 
+
     pmt_headers = ['Loan #', 'Principal', 'Interest', 'Taxes', 'Insurance', 'Reserves', 'Total Payment', 'Due Date']
     for ci, h in enumerate(pmt_headers, 1):
         c = ws.cell(row=row, column=ci, value=h)
         _apply(c, _hdr(fill_color=LIGHT_BLUE, color='000000'))
     row += 1
- 
+
     for i, loan in enumerate(loans):
         if isinstance(loan, dict):
-            ln = str(loan.get('loan_number', '') or '')
+            ln = loan.get('loan_number', '')
             pmt = loan.get('payment_breakdown', {})
             due_date = loan.get('payment_due_date', '')
         else:
-            ln = str(getattr(loan, 'loan_number', '') or '')
+            ln = getattr(loan, 'loan_number', '')
             pmt = getattr(loan, 'payment_breakdown', {})
             due_date = getattr(loan, 'payment_due_date', '')
- 
+
         if isinstance(pmt, dict):
-            p_amt = _safe_float(pmt.get('principal', 0) or 0)
-            i_amt = _safe_float(pmt.get('interest', 0) or 0)
-            t_amt = _safe_float(pmt.get('taxes', 0) or 0)
-            ins_amt = _safe_float(pmt.get('insurance', 0) or 0)
-            r_amt = _safe_float(pmt.get('reserves', 0) or 0)
-            total = _safe_float(pmt.get('total_payment_due', 0) or 0) or (p_amt + i_amt + t_amt + ins_amt + r_amt)
+            def _safe_num(v):
+                if isinstance(v, (int, float)):
+                    return v
+                try:
+                    return float(v) if v else 0
+                except (ValueError, TypeError):
+                    return 0
+            p_amt = _safe_num(pmt.get('principal', 0))
+            i_amt = _safe_num(pmt.get('interest', 0))
+            t_amt = _safe_num(pmt.get('taxes', 0))
+            ins_amt = _safe_num(pmt.get('insurance', 0))
+            r_amt = _safe_num(pmt.get('reserves', 0))
+            total = _safe_num(pmt.get('total_payment_due', 0)) or (p_amt + i_amt + t_amt + ins_amt + r_amt)
         else:
             p_amt = i_amt = t_amt = ins_amt = r_amt = total = 0
- 
+
         alt = i % 2 == 1
         ws.cell(row=row, column=1, value=ln); _apply(ws.cell(row=row, column=1), _cell(alt))
         ws.cell(row=row, column=2, value=p_amt); _apply(ws.cell(row=row, column=2), _cell(alt, fmt='$#,##0.00'))
@@ -528,7 +516,7 @@ def _write_debt_service_workpaper(wb, engine_result):
         ws.cell(row=row, column=5, value=ins_amt); _apply(ws.cell(row=row, column=5), _cell(alt, fmt='$#,##0.00'))
         ws.cell(row=row, column=6, value=r_amt); _apply(ws.cell(row=row, column=6), _cell(alt, fmt='$#,##0.00'))
         ws.cell(row=row, column=7, value=total); _apply(ws.cell(row=row, column=7), _cell(alt, fmt='$#,##0.00'))
- 
+
         due_str = ''
         if isinstance(due_date, datetime):
             due_str = due_date.strftime('%m/%d/%Y')
@@ -536,16 +524,16 @@ def _write_debt_service_workpaper(wb, engine_result):
             due_str = due_date
         ws.cell(row=row, column=8, value=due_str); _apply(ws.cell(row=row, column=8), _cell(alt))
         row += 1
- 
+
     row += 1
- 
+
     # Section C: GL to Loan Tie-Out
     _section_header(ws, row, 1, 4, 'C. GL to Loan Statement Reconciliation')
     row += 1
- 
-    gl_interest = _safe_float(ds_check.get('gl_interest_expense', 0) or 0)
-    loan_interest = _safe_float(ds_check.get('loan_interest_total', 0) or 0)
- 
+
+    gl_interest = ds_check.get('gl_interest_expense', 0)
+    loan_interest = ds_check.get('loan_interest_total', 0)
+
     # Get GL principal payment (account 201100 or similar mortgage payable)
     gl_principal_payment = 0
     if gl_data and hasattr(gl_data, 'accounts'):
@@ -553,7 +541,7 @@ def _write_debt_service_workpaper(wb, engine_result):
             if acct.account_code in ('201100', '201110'):
                 gl_principal_payment = abs(acct.net_change)
                 break
- 
+
     tieout = [
         ('GL Interest Expense (801110) — PTD', gl_interest),
         ('Loan Statement Interest Paid YTD', loan_interest),
@@ -561,7 +549,7 @@ def _write_debt_service_workpaper(wb, engine_result):
         ('', None),
         ('Reconciled', 'Yes' if ds_check.get('reconciled') else 'No'),
     ]
- 
+
     for label, val in tieout:
         if val is None:
             c = ws.cell(row=row, column=1, value=label)
@@ -574,15 +562,15 @@ def _write_debt_service_workpaper(wb, engine_result):
         if isinstance(val, (int, float)):
             c2.number_format = '$#,##0.00'
         row += 1
- 
+
     _auto_width(ws, 8)
     ws.column_dimensions['A'].width = 20
     ws.column_dimensions['B'].width = 25
     ws.sheet_properties.tabColor = '548235'
- 
- 
+
+
 # ── 3. RENT ROLL TIE-OUT ────────────────────────────────────
- 
+
 def _write_rent_roll_workpaper(wb, engine_result):
     """
     Rent roll tie-out workpaper:
@@ -592,57 +580,57 @@ def _write_rent_roll_workpaper(wb, engine_result):
       - Section D: Vacancy / occupancy summary
     """
     ws = wb.create_sheet('Rent Roll Tie-Out')
- 
+
     gl_data = engine_result.parsed.get('gl')
     rr_data = engine_result.parsed.get('rent_roll')
     period = engine_result.period or 'N/A'
     prop = engine_result.property_name or 'N/A'
- 
+
     row = 1
     _title_row(ws, row, f'Rent Roll Tie-Out — {prop}', cols=10)
     row += 1
     _subtitle_row(ws, row, f'Period: {period}  |  Prepared: {datetime.now().strftime("%m/%d/%Y")}', cols=10)
     row += 2
- 
+
     # Section A: Lease Detail
     tenants = rr_data if isinstance(rr_data, list) else []
- 
+
     _section_header(ws, row, 1, 9, f'A. Lease Detail ({len(tenants)} leases)')
     row += 1
- 
+
     rr_headers = ['Unit', 'Tenant', 'Lease Type', 'Area (SF)', 'Lease From', 'Lease To',
                   'Monthly Rent', 'Annual Rent', 'Annual Rent/SF']
     for ci, h in enumerate(rr_headers, 1):
         c = ws.cell(row=row, column=ci, value=h)
         _apply(c, _hdr(fill_color=LIGHT_BLUE, color='000000'))
     row += 1
- 
+
     total_area = 0
     total_monthly = 0
     total_annual = 0
- 
+
     for i, t in enumerate(tenants):
         if isinstance(t, dict):
-            unit = str(t.get('units', t.get('unit', '')) or '')
-            tenant = str(t.get('tenant', t.get('lease', '')) or '')
-            ltype = str(t.get('lease_type', '') or '')
-            area = _safe_float(t.get('area', 0) or 0)
+            unit = t.get('units', t.get('unit', ''))
+            tenant = t.get('tenant', t.get('lease', ''))
+            ltype = t.get('lease_type', '')
+            area = t.get('area', 0) or 0
             lfrom = t.get('lease_from', '')
             lto = t.get('lease_to', '')
-            monthly = _safe_float(t.get('monthly_rent', 0) or 0)
-            annual = _safe_float(t.get('annual_rent', 0) or 0)
-            rent_psf = _safe_float(t.get('annual_rent_per_area', 0) or 0)
+            monthly = t.get('monthly_rent', 0) or 0
+            annual = t.get('annual_rent', 0) or 0
+            rent_psf = t.get('annual_rent_per_area', 0) or 0
         else:
-            unit = str(getattr(t, 'units', getattr(t, 'unit', '')) or '')
-            tenant = str(getattr(t, 'tenant', '') or '')
-            ltype = str(getattr(t, 'lease_type', '') or '')
-            area = _safe_float(getattr(t, 'area', 0) or 0)
+            unit = getattr(t, 'units', getattr(t, 'unit', ''))
+            tenant = getattr(t, 'tenant', '')
+            ltype = getattr(t, 'lease_type', '')
+            area = getattr(t, 'area', 0) or 0
             lfrom = getattr(t, 'lease_from', '')
             lto = getattr(t, 'lease_to', '')
-            monthly = _safe_float(getattr(t, 'monthly_rent', 0) or 0)
-            annual = _safe_float(getattr(t, 'annual_rent', 0) or 0)
-            rent_psf = _safe_float(getattr(t, 'annual_rent_per_area', 0) or 0)
- 
+            monthly = getattr(t, 'monthly_rent', 0) or 0
+            annual = getattr(t, 'annual_rent', 0) or 0
+            rent_psf = getattr(t, 'annual_rent_per_area', 0) or 0
+
         alt = i % 2 == 1
         ws.cell(row=row, column=1, value=unit); _apply(ws.cell(row=row, column=1), _cell(alt))
         ws.cell(row=row, column=2, value=tenant); _apply(ws.cell(row=row, column=2), _cell(alt))
@@ -653,12 +641,12 @@ def _write_rent_roll_workpaper(wb, engine_result):
         ws.cell(row=row, column=7, value=monthly); _apply(ws.cell(row=row, column=7), _cell(alt, fmt='$#,##0.00'))
         ws.cell(row=row, column=8, value=annual); _apply(ws.cell(row=row, column=8), _cell(alt, fmt='$#,##0.00'))
         ws.cell(row=row, column=9, value=rent_psf); _apply(ws.cell(row=row, column=9), _cell(alt, fmt='$#,##0.00'))
- 
+
         total_area += area if isinstance(area, (int, float)) else 0
         total_monthly += monthly if isinstance(monthly, (int, float)) else 0
         total_annual += annual if isinstance(annual, (int, float)) else 0
         row += 1
- 
+
     # Total row
     ws.cell(row=row, column=2, value='TOTAL').font = Font(name='Calibri', size=11, bold=True)
     ws.cell(row=row, column=4, value=total_area)
@@ -673,17 +661,17 @@ def _write_rent_roll_workpaper(wb, engine_result):
     ws.cell(row=row, column=8).font = Font(name='Calibri', size=11, bold=True)
     ws.cell(row=row, column=8).border = DOUBLE_BOTTOM
     row += 2
- 
+
     # Section B: GL Revenue Tie-Out
     _section_header(ws, row, 1, 5, 'B. GL Revenue Account Summary')
     row += 1
- 
+
     rev_headers = ['Account Code', 'Account Name', 'Net Change (PTD)', 'Beginning Balance', 'Ending Balance']
     for ci, h in enumerate(rev_headers, 1):
         c = ws.cell(row=row, column=ci, value=h)
         _apply(c, _hdr(fill_color=LIGHT_BLUE, color='000000'))
     row += 1
- 
+
     gl_revenue_total = 0
     if gl_data and hasattr(gl_data, 'accounts'):
         for acct in gl_data.accounts:
@@ -700,21 +688,21 @@ def _write_rent_roll_workpaper(wb, engine_result):
                     ws.cell(row=row, column=ci).border = THIN_BORDER
                 gl_revenue_total += abs(acct.net_change)
                 row += 1
- 
+
     ws.cell(row=row, column=2, value='TOTAL GL REVENUE (PTD)').font = Font(name='Calibri', size=11, bold=True)
     ws.cell(row=row, column=3, value=gl_revenue_total)
     ws.cell(row=row, column=3).number_format = '$#,##0.00'
     ws.cell(row=row, column=3).font = Font(name='Calibri', size=11, bold=True)
     ws.cell(row=row, column=3).border = DOUBLE_BOTTOM
     row += 2
- 
+
     # Section C: Rent Roll to GL Comparison
     _section_header(ws, row, 1, 4, 'C. Rent Roll to GL Revenue Comparison')
     row += 1
- 
+
     rent_roll_monthly_total = total_monthly
     variance = gl_revenue_total - rent_roll_monthly_total
- 
+
     comp_rows = [
         ('Rent Roll Total Monthly Rent', rent_roll_monthly_total),
         ('GL Total Revenue (PTD)', gl_revenue_total),
@@ -729,17 +717,17 @@ def _write_rent_roll_workpaper(wb, engine_result):
             c2.font = Font(name='Calibri', size=11, bold=True, color='FF0000' if abs(val) > 0.01 else '008000')
             c2.border = DOUBLE_BOTTOM
         row += 1
- 
+
     ws.cell(row=row, column=1, value='Note: Variance reflects straight-line rent adjustments, CAM recoveries, and other non-base-rent revenue').font = Font(name='Calibri', size=10, italic=True, color='666666')
     row += 1
- 
+
     _auto_width(ws, 9)
     ws.column_dimensions['B'].width = 30
     ws.sheet_properties.tabColor = 'BF8F00'
- 
- 
+
+
 # ── 4. ACCRUAL SCHEDULE ─────────────────────────────────────
- 
+
 def _write_accrual_workpaper(wb, engine_result):
     """
     Accrual schedule workpaper:
@@ -749,36 +737,36 @@ def _write_accrual_workpaper(wb, engine_result):
       - Section D: Status summary (pending vs approved)
     """
     ws = wb.create_sheet('Accrual Schedule')
- 
+
     gl_data = engine_result.parsed.get('gl')
     nexus_data = engine_result.parsed.get('nexus_accrual')
     period = engine_result.period or 'N/A'
     prop = engine_result.property_name or 'N/A'
- 
+
     invoices = nexus_data if isinstance(nexus_data, list) else []
- 
+
     row = 1
     _title_row(ws, row, f'Accrual Schedule — {prop}', cols=10)
     row += 1
     _subtitle_row(ws, row, f'Period: {period}  |  Source: Nexus Accrual Detail  |  Prepared: {datetime.now().strftime("%m/%d/%Y")}', cols=10)
     row += 2
- 
+
     # Section A: Invoice Detail
     _section_header(ws, row, 1, 10, f'A. Accrual Detail ({len(invoices)} invoices)')
     row += 1
- 
+
     inv_headers = ['Vendor', 'Invoice #', 'Invoice Date', 'Received Date', 'GL Account',
                    'GL Category', 'Description', 'Status', 'Amount', 'Days Outstanding']
     for ci, h in enumerate(inv_headers, 1):
         c = ws.cell(row=row, column=ci, value=h)
         _apply(c, _hdr(fill_color=LIGHT_BLUE, color='000000'))
     row += 1
- 
+
     total_accrued = 0
     vendor_totals = {}
     status_totals = {}
     aging_buckets = {'0-30': 0, '31-60': 0, '61-90': 0, '90+': 0}
- 
+
     for i, inv in enumerate(invoices):
         vendor = str(inv.get('vendor', '') if isinstance(inv, dict) else getattr(inv, 'vendor', '') or '')
         inv_num = str(inv.get('invoice_number', '') if isinstance(inv, dict) else getattr(inv, 'invoice_number', '') or '')
@@ -788,9 +776,9 @@ def _write_accrual_workpaper(wb, engine_result):
         gl_cat = str(inv.get('gl_category', '') if isinstance(inv, dict) else getattr(inv, 'gl_category', '') or '')
         desc = str(inv.get('line_description', '') if isinstance(inv, dict) else getattr(inv, 'line_description', '') or '')
         status = str(inv.get('invoice_status', '') if isinstance(inv, dict) else getattr(inv, 'invoice_status', '') or '')
-        amount = _safe_float(inv.get('amount', 0) if isinstance(inv, dict) else getattr(inv, 'amount', 0) or 0)
+        amount = inv.get('amount', 0) if isinstance(inv, dict) else getattr(inv, 'amount', 0)
         amount = amount or 0
- 
+
         # Calculate days outstanding
         days_out = ''
         if isinstance(inv_date, datetime):
@@ -801,7 +789,7 @@ def _write_accrual_workpaper(wb, engine_result):
                 days_out = (datetime.now() - dt).days
             except:
                 days_out = ''
- 
+
         # Aging bucket
         if isinstance(days_out, int):
             if days_out <= 30:
@@ -812,29 +800,29 @@ def _write_accrual_workpaper(wb, engine_result):
                 aging_buckets['61-90'] += abs(amount)
             else:
                 aging_buckets['90+'] += abs(amount)
- 
+
         alt = i % 2 == 1
         ws.cell(row=row, column=1, value=vendor); _apply(ws.cell(row=row, column=1), _cell(alt))
         ws.cell(row=row, column=2, value=inv_num); _apply(ws.cell(row=row, column=2), _cell(alt))
- 
+
         inv_date_str = inv_date.strftime('%m/%d/%Y') if isinstance(inv_date, datetime) else str(inv_date or '')
         ws.cell(row=row, column=3, value=inv_date_str); _apply(ws.cell(row=row, column=3), _cell(alt))
- 
+
         recv_date_str = recv_date.strftime('%m/%d/%Y') if isinstance(recv_date, datetime) else str(recv_date or '')
         ws.cell(row=row, column=4, value=recv_date_str); _apply(ws.cell(row=row, column=4), _cell(alt))
- 
+
         ws.cell(row=row, column=5, value=gl_acct); _apply(ws.cell(row=row, column=5), _cell(alt))
         ws.cell(row=row, column=6, value=gl_cat); _apply(ws.cell(row=row, column=6), _cell(alt))
         ws.cell(row=row, column=7, value=desc); _apply(ws.cell(row=row, column=7), _cell(alt))
         ws.cell(row=row, column=8, value=status); _apply(ws.cell(row=row, column=8), _cell(alt))
         ws.cell(row=row, column=9, value=amount); _apply(ws.cell(row=row, column=9), _cell(alt, fmt='$#,##0.00'))
         ws.cell(row=row, column=10, value=days_out); _apply(ws.cell(row=row, column=10), _cell(alt))
- 
+
         total_accrued += amount
         vendor_totals[vendor] = vendor_totals.get(vendor, 0) + amount
         status_totals[status] = status_totals.get(status, 0) + amount
         row += 1
- 
+
     # Total row
     ws.cell(row=row, column=8, value='TOTAL').font = Font(name='Calibri', size=11, bold=True)
     c = ws.cell(row=row, column=9, value=total_accrued)
@@ -842,17 +830,17 @@ def _write_accrual_workpaper(wb, engine_result):
     c.font = Font(name='Calibri', size=11, bold=True)
     c.border = DOUBLE_BOTTOM
     row += 2
- 
+
     # Section B: Aging Summary
     _section_header(ws, row, 1, 4, 'B. Aging Summary')
     row += 1
- 
+
     aging_headers = ['Aging Bucket', 'Amount', '% of Total']
     for ci, h in enumerate(aging_headers, 1):
         c = ws.cell(row=row, column=ci, value=h)
         _apply(c, _hdr(fill_color=LIGHT_BLUE, color='000000'))
     row += 1
- 
+
     for bucket, amt in aging_buckets.items():
         pct = (amt / total_accrued * 100) if total_accrued else 0
         ws.cell(row=row, column=1, value=bucket)
@@ -864,19 +852,19 @@ def _write_accrual_workpaper(wb, engine_result):
         ws.cell(row=row, column=3).number_format = '0.0%'
         ws.cell(row=row, column=3).border = THIN_BORDER
         row += 1
- 
+
     row += 1
- 
+
     # Section C: Vendor Summary
     _section_header(ws, row, 1, 4, f'C. Vendor Summary ({len(vendor_totals)} vendors)')
     row += 1
- 
+
     v_headers = ['Vendor', 'Total Accrued', '% of Total']
     for ci, h in enumerate(v_headers, 1):
         c = ws.cell(row=row, column=ci, value=h)
         _apply(c, _hdr(fill_color=LIGHT_BLUE, color='000000'))
     row += 1
- 
+
     for vendor, amt in sorted(vendor_totals.items(), key=lambda x: abs(x[1]), reverse=True):
         pct = (amt / total_accrued * 100) if total_accrued else 0
         ws.cell(row=row, column=1, value=vendor)
@@ -888,24 +876,24 @@ def _write_accrual_workpaper(wb, engine_result):
         ws.cell(row=row, column=3).number_format = '0.0%'
         ws.cell(row=row, column=3).border = THIN_BORDER
         row += 1
- 
+
     row += 1
- 
+
     # Section D: Status Summary
     _section_header(ws, row, 1, 3, 'D. Invoice Status Summary')
     row += 1
- 
+
     for ci, h in enumerate(['Status', 'Count', 'Amount'], 1):
         c = ws.cell(row=row, column=ci, value=h)
         _apply(c, _hdr(fill_color=LIGHT_BLUE, color='000000'))
     row += 1
- 
+
     # Count by status
     status_counts = {}
     for inv in invoices:
-        s = str(inv.get('invoice_status', '') if isinstance(inv, dict) else getattr(inv, 'invoice_status', '') or '')
+        s = inv.get('invoice_status', '') if isinstance(inv, dict) else getattr(inv, 'invoice_status', '')
         status_counts[s] = status_counts.get(s, 0) + 1
- 
+
     for status, amt in sorted(status_totals.items()):
         ws.cell(row=row, column=1, value=status)
         ws.cell(row=row, column=1).border = THIN_BORDER
@@ -915,39 +903,39 @@ def _write_accrual_workpaper(wb, engine_result):
         ws.cell(row=row, column=3).number_format = '$#,##0.00'
         ws.cell(row=row, column=3).border = THIN_BORDER
         row += 1
- 
+
     _auto_width(ws, 10)
     ws.column_dimensions['A'].width = 25
     ws.column_dimensions['G'].width = 35
     ws.sheet_properties.tabColor = 'C00000'
- 
- 
+
+
 # ── Main entry point ─────────────────────────────────────────
- 
+
 def generate_workpapers(engine_result, output_path: str) -> str:
     """
     Generate the 4-tab workpaper Excel file.
- 
+
     Args:
         engine_result: EngineResult from pipeline run
         output_path: Where to write the Excel file
- 
+
     Returns:
         The output path if successful
     """
     wb = Workbook()
     wb.remove(wb.active)
- 
+
     _write_bank_recon_workpaper(wb, engine_result)
     _write_debt_service_workpaper(wb, engine_result)
     _write_rent_roll_workpaper(wb, engine_result)
     _write_accrual_workpaper(wb, engine_result)
- 
+
     # Add accrual entries review tab
     nexus_data = engine_result.parsed.get('nexus_accrual')
     gl_data = engine_result.parsed.get('gl')
     budget_data = engine_result.parsed.get('budget_comparison')
- 
+
     # Build entries from all three layers (Nexus + budget gaps + historicals)
     je_lines = build_accrual_entries(
         nexus_data or [],
@@ -963,7 +951,6 @@ def generate_workpapers(engine_result, output_path: str) -> str:
                 period=engine_result.period or '',
                 property_name=engine_result.property_name or '',
             )
- 
+
     wb.save(output_path)
     return output_path
- 

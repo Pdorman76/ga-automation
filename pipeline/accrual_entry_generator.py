@@ -22,6 +22,41 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 
+# ── GL dedup utilities ──────────────────────────────────────
+
+def _build_gl_invoice_lookup(gl_data) -> dict:
+    """Build lookup structures to check if an invoice is already in GL.
+    Returns dict with 'by_reference' and 'by_control' keys, each mapping
+    strings to lists of transactions."""
+    lookup = {'by_reference': {}, 'by_control': {}}
+    if not gl_data or not hasattr(gl_data, 'all_transactions'):
+        return lookup
+
+    for txn in gl_data.all_transactions:
+        ref = (txn.reference or '').strip()
+        if ref:
+            lookup['by_reference'].setdefault(ref, []).append(txn)
+        ctrl = (txn.control or '').strip()
+        if ctrl:
+            lookup['by_control'].setdefault(ctrl, []).append(txn)
+
+    return lookup
+
+
+def _is_invoice_in_gl(invoice_number: str, gl_lookup: dict) -> bool:
+    """Check if an invoice number already appears in GL transactions,
+    either as a direct reference match or as a substring of a control number."""
+    if not invoice_number:
+        return False
+    inv = invoice_number.strip()
+    if inv in gl_lookup['by_reference']:
+        return True
+    for ctrl in gl_lookup['by_control']:
+        if inv in ctrl:
+            return True
+    return False
+
+
 # ── Constants ────────────────────────────────────────────────
 
 AP_ACCRUAL_ACCOUNT = '211200'
@@ -97,25 +132,45 @@ def detect_budget_gaps(gl_data, budget_data) -> List[Dict[str, Any]]:
             name = str(item.get('account_name', '') or '').strip()
             ptd_budget = item.get('ptd_budget', 0) or 0
             ptd_actual = item.get('ptd_actual', 0) or 0
+            ytd_budget = item.get('ytd_budget', 0) or 0
+            annual = item.get('annual', 0) or 0
         else:
             code = str(getattr(item, 'account_code', '') or '').strip()
             name = str(getattr(item, 'account_name', '') or '').strip()
             ptd_budget = getattr(item, 'ptd_budget', 0) or 0
             ptd_actual = getattr(item, 'ptd_actual', 0) or 0
+            ytd_budget = getattr(item, 'ytd_budget', 0) or 0
+            annual = getattr(item, 'annual', 0) or 0
 
         if not code or 'TOTAL' in name.upper():
             continue
 
-        # Only expense accounts (5xxxxx-8xxxxx) with budget > $100 and no actual
         first_digit = code[0] if code else '0'
-        if first_digit in ('5', '6', '7', '8') and abs(ptd_budget) > 100 and abs(ptd_actual) < 1:
-            candidates.append({
-                'account_code': code,
-                'account_name': name,
-                'budget_amount': abs(ptd_budget),
-                'source': 'budget_gap',
-                'description': f'Budget gap — {name} budgeted ${abs(ptd_budget):,.2f}, no GL activity',
-            })
+        if first_digit not in ('5', '6', '7', '8'):
+            continue
+
+        # Materiality: budget must exceed $500 with no GL activity
+        if abs(ptd_budget) <= 500 or abs(ptd_actual) >= 1:
+            continue
+
+        # Skip if YTD budget is zero but annual exists (not yet allocated)
+        if abs(ytd_budget) < 1 and abs(annual) > 0:
+            continue
+
+        # Seasonality: if PTD budget is less than 30% of monthly average,
+        # this is likely a low-budget month — don't accrue
+        if abs(annual) > 0:
+            monthly_avg = abs(annual) / 12
+            if monthly_avg > 0 and abs(ptd_budget) < monthly_avg * 0.3:
+                continue
+
+        candidates.append({
+            'account_code': code,
+            'account_name': name,
+            'budget_amount': abs(ptd_budget),
+            'source': 'budget_gap',
+            'description': f'Budget gap — {name} budgeted ${abs(ptd_budget):,.2f}, no GL activity',
+        })
 
     return candidates
 
@@ -150,6 +205,23 @@ def detect_historical_recurring(gl_data, budget_data) -> List[Dict[str, Any]]:
         month_name = period_str.split('-')[0]
         month_num = month_map.get(month_name, 1)
 
+    # Require at least 2 prior months of data to extrapolate
+    prior_months = month_num - 1
+    if prior_months < 2:
+        return candidates
+
+    # Build budget lookup for cross-reference
+    budget_by_code = {}
+    if budget_data:
+        budget_items = budget_data if isinstance(budget_data, list) else getattr(budget_data, 'line_items', [])
+        for item in budget_items:
+            if isinstance(item, dict):
+                bcode = str(item.get('account_code', '') or '').strip()
+                budget_by_code[bcode] = item
+            else:
+                bcode = str(getattr(item, 'account_code', '') or '').strip()
+                budget_by_code[bcode] = item
+
     for acct in gl_data.accounts:
         code = acct.account_code
         first_digit = code[0] if code else '0'
@@ -163,13 +235,24 @@ def detect_historical_recurring(gl_data, budget_data) -> List[Dict[str, Any]]:
             continue
 
         # Check if beginning balance suggests recurring prior activity
-        # Beginning balance for expense accounts is YTD through prior month
         begin = abs(acct.beginning_balance)
-        if begin < 100 or month_num <= 1:
+        if begin < 100:
             continue
 
+        # Cross-reference against budget: zero budget + zero activity = likely discontinued
+        if code in budget_by_code:
+            bi = budget_by_code[code]
+            if isinstance(bi, dict):
+                bi_budget = bi.get('ptd_budget', 0) or 0
+                bi_annual = bi.get('annual', 0) or 0
+            else:
+                bi_budget = getattr(bi, 'ptd_budget', 0) or 0
+                bi_annual = getattr(bi, 'annual', 0) or 0
+
+            if abs(bi_budget) < 1 and abs(bi_annual) < 1:
+                continue  # Zero budget everywhere — likely discontinued
+
         # Estimate monthly amount from YTD / months elapsed
-        prior_months = month_num - 1
         est_monthly = begin / prior_months
 
         # Only flag if estimated monthly > $500 (material recurring expense)
@@ -218,6 +301,9 @@ def build_accrual_entries(nexus_data: list, period: str = '',
                     if (inv.get('invoice_status', '') or '').lower()
                     in [s.lower() for s in status_filter]]
 
+    # Build GL lookup for Layer 1 deduplication
+    gl_lookup = _build_gl_invoice_lookup(gl_data) if gl_data else {'by_reference': {}, 'by_control': {}}
+
     je_lines = []
     je_num = 1
 
@@ -231,6 +317,10 @@ def build_accrual_entries(nexus_data: list, period: str = '',
         amount = inv.get('amount', 0) or 0
 
         if amount == 0:
+            continue
+
+        # Dedup: skip invoices already recorded in GL
+        if inv_num and _is_invoice_in_gl(inv_num, gl_lookup):
             continue
 
         # Format date

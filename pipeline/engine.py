@@ -7,7 +7,8 @@ for the report generator.
 """
 
 import os
-from datetime import datetime, date
+import re
+from datetime import datetime, date, timedelta
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict, Tuple
 
@@ -77,6 +78,9 @@ class EngineResult:
     def warning_count(self):
         return sum(1 for e in self.exceptions if e.severity == "warning")
 
+    # Bank reconciliation detail (computed once, consumed by workpaper)
+    bank_recon_detail: Optional['BankReconDetail'] = None
+
     @property
     def status(self):
         if self.error_count > 0:
@@ -84,6 +88,263 @@ class EngineResult:
         if self.warning_count > 0:
             return "WARNINGS"
         return "CLEAN"
+
+
+@dataclass
+class BankReconDetail:
+    """Full bank reconciliation output — computed once by the engine,
+    consumed by workpaper generator and dashboard."""
+    # Balances
+    gl_ending: float = 0
+    gl_beginning: float = 0
+    bank_ending: float = 0
+    bank_beginning: float = 0
+
+    # Matched items: list of dicts with keys gl_txn, bank_item, match_type
+    matched_checks: list = field(default_factory=list)
+    matched_ach: list = field(default_factory=list)
+    matched_deposits: list = field(default_factory=list)
+
+    # Unmatched items
+    outstanding_checks: list = field(default_factory=list)       # GL credits not on bank
+    deposits_in_transit: list = field(default_factory=list)       # GL debits not on bank
+    unmatched_bank_checks: list = field(default_factory=list)     # Bank checks not in GL
+    unmatched_bank_ach: list = field(default_factory=list)        # Bank ACH not in GL
+    unmatched_bank_deposits: list = field(default_factory=list)   # Bank deposits not in GL
+
+    # Reconciliation math
+    total_outstanding_checks: float = 0
+    total_deposits_in_transit: float = 0
+    adjusted_bank_balance: float = 0
+    reconciling_difference: float = 0
+
+
+# ── Bank recon helpers ──────────────────────────────────────
+
+def _parse_bank_date(date_str: str, period_str: str) -> Optional[date]:
+    """Convert bank date string (mm/dd or mm/dd/yyyy) to datetime.date
+    using the year from the GL period string (e.g. 'Feb-2026')."""
+    if not date_str or not isinstance(date_str, str):
+        return None
+
+    # Extract year from period
+    year = datetime.now().year
+    if '-' in period_str:
+        try:
+            year = int(period_str.split('-')[1])
+        except (IndexError, ValueError):
+            pass
+
+    # Try mm/dd/yyyy first
+    for fmt in ('%m/%d/%Y', '%m/%d/%y', '%m/%d'):
+        try:
+            parsed = datetime.strptime(date_str.strip(), fmt)
+            if fmt == '%m/%d':
+                # Handle year-end crossover: Dec bank date with Jan GL period
+                if parsed.month in (11, 12) and period_str.startswith(('Jan', 'Feb')):
+                    return parsed.replace(year=year - 1).date()
+                return parsed.replace(year=year).date()
+            return parsed.date()
+        except ValueError:
+            continue
+    return None
+
+
+def _extract_check_number(control: str) -> Optional[str]:
+    """Extract numeric check number from GL control like 'P-12345'."""
+    if not control:
+        return None
+    m = re.match(r'^P-(\d+)$', control.strip())
+    return m.group(1) if m else None
+
+
+def _match_checks(gl_check_txns: list, bank_checks: list,
+                   period_str: str) -> Tuple[list, list, list, list]:
+    """
+    3-pass check matching:
+      Pass 1: check number + amount (highest confidence)
+      Pass 2: amount + date proximity within 30 days
+      Pass 3: amount-only fallback (lowest confidence)
+
+    Returns: (matched, unmatched_gl, unmatched_bank_checks, all passes info)
+    """
+    matched = []
+    gl_remaining = list(gl_check_txns)
+    bank_remaining = list(bank_checks)
+
+    # Pass 1: Check number + amount
+    still_unmatched_gl = []
+    for gl_txn in gl_remaining:
+        gl_num = _extract_check_number(gl_txn.control)
+        if not gl_num:
+            still_unmatched_gl.append(gl_txn)
+            continue
+
+        found = False
+        for i, bk in enumerate(bank_remaining):
+            bk_num = str(bk.get('check_number', '')).strip().lstrip('0') or ''
+            gl_num_stripped = gl_num.lstrip('0') or ''
+            if bk_num and gl_num_stripped and bk_num == gl_num_stripped:
+                if abs(gl_txn.credit - bk.get('amount', 0)) < 0.01:
+                    matched.append({
+                        'gl_txn': gl_txn,
+                        'bank_item': bk,
+                        'match_type': 'check_number+amount',
+                    })
+                    bank_remaining.pop(i)
+                    found = True
+                    break
+        if not found:
+            still_unmatched_gl.append(gl_txn)
+
+    gl_remaining = still_unmatched_gl
+
+    # Pass 2: Amount + date proximity (within 30 days)
+    still_unmatched_gl = []
+    for gl_txn in gl_remaining:
+        gl_date = gl_txn.date
+        if not gl_date:
+            still_unmatched_gl.append(gl_txn)
+            continue
+
+        found = False
+        best_idx = None
+        best_days = 999
+        for i, bk in enumerate(bank_remaining):
+            if abs(gl_txn.credit - bk.get('amount', 0)) < 0.01:
+                bk_date = _parse_bank_date(bk.get('date', ''), period_str)
+                if bk_date:
+                    days_diff = abs((gl_date - bk_date).days)
+                    if days_diff <= 30 and days_diff < best_days:
+                        best_idx = i
+                        best_days = days_diff
+
+        if best_idx is not None:
+            matched.append({
+                'gl_txn': gl_txn,
+                'bank_item': bank_remaining[best_idx],
+                'match_type': 'amount+date',
+            })
+            bank_remaining.pop(best_idx)
+            found = True
+
+        if not found:
+            still_unmatched_gl.append(gl_txn)
+
+    gl_remaining = still_unmatched_gl
+
+    # Pass 3: Amount-only fallback
+    still_unmatched_gl = []
+    for gl_txn in gl_remaining:
+        found = False
+        for i, bk in enumerate(bank_remaining):
+            if abs(gl_txn.credit - bk.get('amount', 0)) < 0.01:
+                matched.append({
+                    'gl_txn': gl_txn,
+                    'bank_item': bk,
+                    'match_type': 'amount_only',
+                })
+                bank_remaining.pop(i)
+                found = True
+                break
+        if not found:
+            still_unmatched_gl.append(gl_txn)
+
+    return matched, still_unmatched_gl, bank_remaining
+
+
+def _match_ach(gl_credit_txns: list, bank_ach: list,
+                period_str: str) -> Tuple[list, list, list]:
+    """Match bank ACH debits to GL credits by amount + date proximity (15 days).
+    Returns: (matched, unmatched_gl, unmatched_bank_ach)"""
+    matched = []
+    gl_remaining = list(gl_credit_txns)
+    bank_remaining = list(bank_ach)
+
+    still_unmatched_gl = []
+    for gl_txn in gl_remaining:
+        gl_date = gl_txn.date
+        found = False
+        best_idx = None
+        best_days = 999
+
+        for i, bk in enumerate(bank_remaining):
+            if abs(gl_txn.credit - bk.get('amount', 0)) < 0.01:
+                if gl_date:
+                    bk_date = _parse_bank_date(bk.get('date', ''), period_str)
+                    if bk_date:
+                        days_diff = abs((gl_date - bk_date).days)
+                        if days_diff <= 15 and days_diff < best_days:
+                            best_idx = i
+                            best_days = days_diff
+                    else:
+                        # No parseable bank date — accept amount match
+                        if best_idx is None:
+                            best_idx = i
+                else:
+                    # No GL date — accept amount match
+                    if best_idx is None:
+                        best_idx = i
+
+        if best_idx is not None:
+            matched.append({
+                'gl_txn': gl_txn,
+                'bank_item': bank_remaining[best_idx],
+                'match_type': 'amount+date' if best_days < 999 else 'amount_only',
+            })
+            bank_remaining.pop(best_idx)
+            found = True
+
+        if not found:
+            still_unmatched_gl.append(gl_txn)
+
+    return matched, still_unmatched_gl, bank_remaining
+
+
+def _match_deposits(gl_debit_txns: list, bank_deposits: list,
+                     period_str: str) -> Tuple[list, list, list]:
+    """Match GL debits (deposits) to bank deposits by amount + date proximity (7 days).
+    Returns: (matched, unmatched_gl_deposits, unmatched_bank_deposits)"""
+    matched = []
+    gl_remaining = list(gl_debit_txns)
+    bank_remaining = list(bank_deposits)
+
+    still_unmatched_gl = []
+    for gl_txn in gl_remaining:
+        gl_date = gl_txn.date
+        found = False
+        best_idx = None
+        best_days = 999
+
+        for i, bk in enumerate(bank_remaining):
+            if abs(gl_txn.debit - bk.get('amount', 0)) < 0.01:
+                if gl_date:
+                    bk_date = _parse_bank_date(bk.get('date', ''), period_str)
+                    if bk_date:
+                        days_diff = abs((gl_date - bk_date).days)
+                        if days_diff <= 7 and days_diff < best_days:
+                            best_idx = i
+                            best_days = days_diff
+                    else:
+                        if best_idx is None:
+                            best_idx = i
+                else:
+                    if best_idx is None:
+                        best_idx = i
+
+        if best_idx is not None:
+            matched.append({
+                'gl_txn': gl_txn,
+                'bank_item': bank_remaining[best_idx],
+                'match_type': 'amount+date' if best_days < 999 else 'amount_only',
+            })
+            bank_remaining.pop(best_idx)
+            found = True
+
+        if not found:
+            still_unmatched_gl.append(gl_txn)
+
+    return matched, still_unmatched_gl, bank_remaining
 
 
 # ── Cross-validation functions ───────────────────────────────
@@ -170,22 +431,25 @@ def match_gl_to_invoices(gl_result, nexus_result) -> Tuple[List[MatchResult], Li
     return matches, exceptions
 
 
-def match_gl_to_bank(gl_result, bank_result) -> Tuple[List[MatchResult], List[Exception_]]:
+def match_gl_to_bank(gl_result, bank_result) -> Tuple[List[MatchResult], List[Exception_], Optional[BankReconDetail]]:
     """
-    Reconcile GL cash account to bank statement.
+    Reconcile GL cash account to bank statement using multi-factor matching.
 
-    Yardi control numbers (C-xxxx, K-xxxx) don't directly map to bank
-    check numbers, so we do an aggregate reconciliation:
-      - Compare GL cash account ending balance to bank ending balance
-      - Compare total debits/credits
-      - Flag the variance as timing differences (outstanding checks/deposits)
-      - Match ACH payments by amount to GL entries where possible
+    Check matching uses 3 passes:
+      Pass 1: GL control P-{num} matched to bank check_number + amount
+      Pass 2: Amount + date proximity (within 30 days)
+      Pass 3: Amount-only fallback
+
+    ACH and deposit matching use amount + date proximity.
+
+    Returns the MatchResult list (for dashboard), exceptions, and a
+    BankReconDetail (for the workpaper generator).
     """
     matches = []
     exceptions = []
 
     if bank_result is None:
-        return matches, exceptions
+        return matches, exceptions, None
 
     # Get GL cash account (111100)
     gl_cash_acct = None
@@ -201,28 +465,82 @@ def match_gl_to_bank(gl_result, bank_result) -> Tuple[List[MatchResult], List[Ex
             source="gl_bank_recon",
             description="GL Cash-Operating (111100) account not found",
         ))
-        return matches, exceptions
+        return matches, exceptions, None
 
-    # Get bank balances and totals
+    # Extract bank data
     bank_data = bank_result if isinstance(bank_result, dict) else {}
     bank_begin = bank_data.get('beginning_balance', 0) or 0
     bank_end = bank_data.get('ending_balance', 0) or 0
     bank_checks = bank_data.get('checks', [])
     bank_ach = bank_data.get('ach_debits', [])
     bank_deposits = bank_data.get('deposits', [])
-    bank_wires = bank_data.get('wire_transfers', [])
 
-    bank_total_checks = sum(c.get('amount', 0) for c in bank_checks)
-    bank_total_ach = sum(a.get('amount', 0) for a in bank_ach)
-    bank_total_deposits = sum(d.get('amount', 0) for d in bank_deposits)
-
-    # Aggregate reconciliation
     gl_begin = gl_cash_acct.beginning_balance
     gl_end = gl_cash_acct.ending_balance
-    gl_debits = gl_cash_acct.total_debits
-    gl_credits = gl_cash_acct.total_credits
 
-    # Balance comparison
+    # Determine period string for date parsing
+    period_str = ''
+    if hasattr(gl_result, 'metadata'):
+        period_str = getattr(gl_result.metadata, 'period', '') or ''
+
+    # ── Categorize GL cash transactions ──
+    gl_check_credits = []   # P- prefix, credit > 0
+    gl_other_credits = []   # Non-check credits (ACH, journals, etc.)
+    gl_debits = []           # All debits (deposits/receipts)
+
+    if hasattr(gl_cash_acct, 'transactions'):
+        for txn in gl_cash_acct.transactions:
+            ctrl = (txn.control or '').strip()
+            if txn.credit > 0:
+                if ctrl.startswith('P-'):
+                    gl_check_credits.append(txn)
+                else:
+                    gl_other_credits.append(txn)
+            if txn.debit > 0:
+                gl_debits.append(txn)
+
+    # ── Multi-factor check matching ──
+    matched_checks, outstanding_checks, unmatched_bank_checks = _match_checks(
+        gl_check_credits, bank_checks, period_str
+    )
+
+    # ── ACH matching (all ACH, not just Berkadia) ──
+    matched_ach, unmatched_gl_ach, unmatched_bank_ach = _match_ach(
+        gl_other_credits, bank_ach, period_str
+    )
+
+    # ── Deposit matching ──
+    matched_deposits, deposits_in_transit, unmatched_bank_deps = _match_deposits(
+        gl_debits, bank_deposits, period_str
+    )
+
+    # ── Compute reconciliation totals ──
+    total_outstanding = sum(t.credit for t in outstanding_checks)
+    total_dit = sum(t.debit for t in deposits_in_transit)
+    adjusted_bank = bank_end - total_outstanding + total_dit
+    recon_diff = gl_end - adjusted_bank
+
+    # ── Build BankReconDetail ──
+    recon = BankReconDetail(
+        gl_ending=gl_end,
+        gl_beginning=gl_begin,
+        bank_ending=bank_end,
+        bank_beginning=bank_begin,
+        matched_checks=matched_checks,
+        matched_ach=matched_ach,
+        matched_deposits=matched_deposits,
+        outstanding_checks=outstanding_checks,
+        deposits_in_transit=deposits_in_transit,
+        unmatched_bank_checks=unmatched_bank_checks,
+        unmatched_bank_ach=unmatched_bank_ach,
+        unmatched_bank_deposits=unmatched_bank_deps,
+        total_outstanding_checks=total_outstanding,
+        total_deposits_in_transit=total_dit,
+        adjusted_bank_balance=adjusted_bank,
+        reconciling_difference=recon_diff,
+    )
+
+    # ── Build MatchResult list for dashboard backward compat ──
     balance_var = gl_end - bank_end
     matches.append(MatchResult(
         source_a="GL", source_b="Bank",
@@ -234,44 +552,87 @@ def match_gl_to_bank(gl_result, bank_result) -> Tuple[List[MatchResult], List[Ex
         details={"gl_begin": gl_begin, "bank_begin": bank_begin},
     ))
 
+    matches.append(MatchResult(
+        source_a="GL", source_b="Bank",
+        key="Checks Matched",
+        amount_a=sum(m['gl_txn'].credit for m in matched_checks),
+        amount_b=sum(m['bank_item'].get('amount', 0) for m in matched_checks),
+        matched=True,
+        variance=0,
+        description=f"{len(matched_checks)} checks matched ({sum(1 for m in matched_checks if m['match_type'] == 'check_number+amount')} by check#, "
+                    f"{sum(1 for m in matched_checks if m['match_type'] == 'amount+date')} by date, "
+                    f"{sum(1 for m in matched_checks if m['match_type'] == 'amount_only')} by amount only)",
+    ))
+
+    if outstanding_checks:
+        matches.append(MatchResult(
+            source_a="GL", source_b="Bank",
+            key="Outstanding Checks",
+            amount_a=total_outstanding, amount_b=0,
+            matched=False,
+            variance=total_outstanding,
+            description=f"{len(outstanding_checks)} outstanding check(s) totaling ${total_outstanding:,.2f}",
+        ))
+
+    if deposits_in_transit:
+        matches.append(MatchResult(
+            source_a="GL", source_b="Bank",
+            key="Deposits in Transit",
+            amount_a=total_dit, amount_b=0,
+            matched=False,
+            variance=total_dit,
+            description=f"{len(deposits_in_transit)} deposit(s) in transit totaling ${total_dit:,.2f}",
+        ))
+
+    matches.append(MatchResult(
+        source_a="GL", source_b="Bank",
+        key="Reconciling Difference",
+        amount_a=gl_end, amount_b=adjusted_bank,
+        matched=abs(recon_diff) < 0.01,
+        variance=abs(recon_diff),
+        description=f"Adjusted bank balance: ${adjusted_bank:,.2f} | Difference: ${recon_diff:,.2f}",
+    ))
+
+    # Matched ACH detail
+    for m in matched_ach:
+        bk = m['bank_item']
+        desc = bk.get('description', '')[:50]
+        amt = bk.get('amount', 0)
+        matches.append(MatchResult(
+            source_a="Bank ACH", source_b="GL",
+            key=desc,
+            amount_a=amt, amount_b=m['gl_txn'].credit,
+            matched=True,
+            variance=0,
+            description=f"ACH payment matched: ${amt:,.2f} ({m['match_type']})",
+            details={"date": bk.get('date', ''), "reference": bk.get('reference', '')},
+        ))
+
+    # Exceptions
     if abs(balance_var) > 0.01:
         exceptions.append(Exception_(
             severity="info", category="balance",
             source="gl_bank_recon",
             description=(
                 f"GL ending balance (${gl_end:,.2f}) differs from bank ending balance "
-                f"(${bank_end:,.2f}) by ${balance_var:,.2f} — likely timing differences "
-                f"(outstanding checks/deposits in transit)"
+                f"(${bank_end:,.2f}) by ${balance_var:,.2f} — "
+                f"outstanding checks: ${total_outstanding:,.2f}, "
+                f"deposits in transit: ${total_dit:,.2f}, "
+                f"remaining difference: ${recon_diff:,.2f}"
             ),
         ))
 
-    # Check totals
-    matches.append(MatchResult(
-        source_a="GL", source_b="Bank",
-        key="Total Checks Cleared",
-        amount_a=gl_credits, amount_b=bank_total_checks,
-        matched=False,  # These won't match due to timing
-        variance=abs(gl_credits - bank_total_checks),
-        description=f"GL total credits vs. bank checks cleared ({len(bank_checks)} checks)",
-        details={"bank_check_count": len(bank_checks)},
-    ))
+    if abs(recon_diff) > 0.01:
+        exceptions.append(Exception_(
+            severity="warning", category="balance",
+            source="gl_bank_recon",
+            description=(
+                f"Reconciling difference of ${recon_diff:,.2f} after accounting for "
+                f"outstanding checks and deposits in transit — requires investigation"
+            ),
+        ))
 
-    # Match Berkadia ACH payments to GL debt service
-    for ach in bank_ach:
-        desc = ach.get('description', '')
-        amount = ach.get('amount', 0)
-        if 'Berkadia' in desc or 'Loan' in desc:
-            matches.append(MatchResult(
-                source_a="Bank ACH", source_b="Loan Payment",
-                key=desc[:50],
-                amount_a=amount, amount_b=amount,
-                matched=True,
-                variance=0,
-                description=f"Berkadia loan payment: ${amount:,.2f}",
-                details={"date": ach.get('date', ''), "reference": ach.get('reference', '')},
-            ))
-
-    return matches, exceptions
+    return matches, exceptions, recon
 
 
 def check_debt_service(gl_result, loan_result) -> Tuple[dict, List[Exception_]]:
@@ -639,8 +1000,9 @@ def run_pipeline(files: dict) -> EngineResult:
 
     # ── Step 5: Match GL to bank ─────────────────────────────
     if gl and bank_data:
-        gl_bank_matches, gl_bank_exc = match_gl_to_bank(gl, bank_data)
+        gl_bank_matches, gl_bank_exc, bank_recon = match_gl_to_bank(gl, bank_data)
         result.gl_bank_matches = gl_bank_matches
+        result.bank_recon_detail = bank_recon
         result.exceptions.extend(gl_bank_exc)
 
     # ── Step 6: Debt service check ───────────────────────────

@@ -34,7 +34,7 @@ from openpyxl.utils import get_column_letter
 from parsers.monthly_report_template import ReportLine, TabStructure
 
 
-# ââ Styling utilities ââââââââââââââââââââââââââââââââââââââââ
+# ── Styling utilities ────────────────────────────────────────
 
 def _header_style():
     """Create dark blue header style with white text."""
@@ -111,12 +111,12 @@ def _auto_width_columns(ws, columns: int):
         ws.column_dimensions[col_letter].width = min(max_len + 2, 50)
 
 
-# ââ Helper functions to build tabs from GL and IS data ââââââââ
+# ── Helper functions to build tabs from GL and IS data ────────
 
 def _build_bs_tab_from_gl(gl_data) -> Optional[TabStructure]:
     """
     Build Balance Sheet tab from GL data.
-    Filter to BS account codes (1xxxxx through 3xxxxx â assets, liabilities, equity).
+    Filter to BS account codes (1xxxxx through 3xxxxx — assets, liabilities, equity).
     Columns: Account Code, Account Name, Balance Current Period, Beginning Balance, Net Change.
     """
     if not gl_data or not hasattr(gl_data, 'accounts'):
@@ -188,43 +188,59 @@ def _build_is_tab_from_is_data(is_data) -> Optional[TabStructure]:
 def _build_t12_tab_from_gl(gl_data) -> Optional[TabStructure]:
     """
     Build Trailing 12 Months tab from GL data.
-    For now, create a single-month T12 with current month's net_change in the appropriate column.
-    Columns: Account Code, Account Name, Jan 2026...Dec 2026, Total.
+
+    With a single GL file we only have one month of transaction detail.
+    For P&L accounts (4-8xxxxx), we use beginning_balance as YTD-prior
+    and distribute it evenly across prior months as an estimate.
+    The current month gets the actual net_change.
+    Future months are left blank (None) rather than showing misleading zeros.
     """
     if not gl_data or not hasattr(gl_data, 'accounts'):
         return None
 
-    # Determine current month from metadata period (e.g., "Feb-2026" -> month 2)
+    # Determine current month and year from period
     period_str = getattr(gl_data.metadata, 'period', '')
-    month_num = 2  # Default to Feb
-    if '-' in period_str:
-        month_name = period_str.split('-')[0]
-        month_map = {
-            'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
-            'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12,
-        }
-        month_num = month_map.get(month_name, 2)
-
-    # Month headers: Jan 2026...Dec 2026, Total
+    month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    month_num = 2  # Default
     year = 2026
-    month_headers = [f'{month} {year}' for month in
-                     ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']]
+    if '-' in period_str:
+        name_part = period_str.split('-')[0]
+        month_map = {m: i + 1 for i, m in enumerate(month_names)}
+        month_num = month_map.get(name_part, 2)
+        try:
+            year = int(period_str.split('-')[1])
+        except (IndexError, ValueError):
+            pass
+
+    month_headers = [f'{m} {year}' for m in month_names]
     month_headers.append('Total')
 
     line_items = []
     for account in gl_data.accounts:
         values = {}
+        first_digit = account.account_code[0] if account.account_code else '0'
+        is_pnl = first_digit in ('4', '5', '6', '7', '8')
+        prior_months = month_num - 1
+
         total = 0
-        for i, month_header in enumerate(month_headers[:-1]):  # Exclude "Total" for now
-            if i + 1 == month_num:
-                # Current month gets the net_change
+        for i, month_header in enumerate(month_headers[:-1]):
+            col_month = i + 1  # 1-based month number
+
+            if col_month == month_num:
+                # Current month: actual net_change
                 values[month_header] = account.net_change
                 total += account.net_change
+            elif col_month < month_num and is_pnl and prior_months > 0:
+                # Prior months for P&L: distribute beginning_balance evenly
+                est = account.beginning_balance / prior_months
+                values[month_header] = round(est, 2)
+                total += round(est, 2)
             else:
-                # Other months get 0
-                values[month_header] = 0
+                # Future months or BS accounts with no prior data
+                values[month_header] = None
 
-        values['Total'] = total
+        values['Total'] = total if total != 0 else None
 
         report_line = ReportLine(
             account_code=account.account_code,
@@ -280,12 +296,61 @@ def _build_tb_mtd_tab_from_gl(gl_data) -> Optional[TabStructure]:
 def _build_tb_ytd_tab_from_gl(gl_data) -> Optional[TabStructure]:
     """
     Build Trial Balance YTD tab from GL data.
-    Same as TB-MTD for now (single month = YTD).
+
+    Differs from TB-MTD:
+    - Forward Balance: always 0 for P&L accounts (YTD starts fresh each year),
+      beginning_balance for BS accounts
+    - Debit/Credit: YTD cumulative (beginning_balance activity + current month)
+      For P&L: beginning_balance captures prior-month YTD, so YTD debits =
+      prior debits (estimated from beginning) + current debits
+    - Ending Balance: same as MTD (it's already the YTD position)
     """
-    return _build_tb_mtd_tab_from_gl(gl_data)
+    if not gl_data or not hasattr(gl_data, 'accounts'):
+        return None
+
+    line_items = []
+    for account in gl_data.accounts:
+        first_digit = account.account_code[0] if account.account_code else '0'
+        is_pnl = first_digit in ('4', '5', '6', '7', '8')
+
+        if is_pnl:
+            # P&L accounts: YTD forward balance is 0 (resets each year)
+            # YTD activity = beginning_balance (prior months' net) + current month
+            # We can't perfectly split prior YTD into DR/CR, so show net activity
+            ytd_forward = 0
+            ytd_debit = account.beginning_balance + account.total_debits if account.beginning_balance > 0 else account.total_debits
+            ytd_credit = abs(account.beginning_balance) + account.total_credits if account.beginning_balance < 0 else account.total_credits
+        else:
+            # BS accounts: forward balance is the beginning of year
+            # For simplicity with single-month data, use beginning_balance
+            ytd_forward = account.beginning_balance
+            ytd_debit = account.total_debits
+            ytd_credit = account.total_credits
+
+        report_line = ReportLine(
+            account_code=account.account_code,
+            account_name=account.account_name,
+            values={
+                'Forward Balance': ytd_forward,
+                'Debit': ytd_debit,
+                'Credit': ytd_credit,
+                'Ending Balance': account.ending_balance,
+            },
+            row_number=0,
+            is_total=False,
+        )
+        line_items.append(report_line)
+
+    return TabStructure(
+        name='TB - YTD',
+        columns=['account_code', 'account_name', 'Forward Balance', 'Debit', 'Credit', 'Ending Balance'],
+        data_start_row=2,
+        row_count=len(line_items),
+        line_items=line_items,
+    )
 
 
-# ââ Main report generator ââââââââââââââââââââââââââââââââââââ
+# ── Main report generator ────────────────────────────────────
 
 def generate_report(engine_result, output_path: str) -> str:
     """
@@ -364,7 +429,7 @@ def generate_report(engine_result, output_path: str) -> str:
     return output_path
 
 
-# ââ Tab writers âââââââââââââââââââââââââââââââââââââââââââââ
+# ── Tab writers ─────────────────────────────────────────────
 
 def _write_empty_tab(wb: Workbook, tab_name: str):
     """Create an empty tab with proper headers."""
@@ -447,7 +512,9 @@ def _write_is_tab(wb: Workbook, is_tab):
 def _write_t12_tab(wb: Workbook, t12_tab):
     """
     Write Trailing 12 Months tab.
-    Columns: account_code, account_name, Jan 2026...Dec 2026, Total
+    Columns: account_code, account_name, Jan 2026...Dec 2026, Total.
+    Prior months show estimated values from YTD beginning balance.
+    Future months show blank (not zero).
     """
     ws = wb.create_sheet('T12')
 
@@ -470,9 +537,13 @@ def _write_t12_tab(wb: Workbook, t12_tab):
         _apply_style(ws.cell(row=row_num, column=2), _data_style(alternate))
 
         for col_num, month in enumerate(months, start=3):
-            val = line_item.values.get(month, 0)
-            ws.cell(row=row_num, column=col_num, value=val)
-            _apply_style(ws.cell(row=row_num, column=col_num), _currency_style(alternate))
+            val = line_item.values.get(month)
+            if val is not None:
+                ws.cell(row=row_num, column=col_num, value=val)
+                _apply_style(ws.cell(row=row_num, column=col_num), _currency_style(alternate))
+            else:
+                # Leave blank for future months / unavailable data
+                _apply_style(ws.cell(row=row_num, column=col_num), _data_style(alternate))
 
     _auto_width_columns(ws, len(headers))
 
@@ -627,7 +698,7 @@ def _write_tenancy_tab(wb: Workbook, rent_roll_data: List[Dict]):
     _auto_width_columns(ws, len(headers))
 
 
-# ââ Exception report generator âââââââââââââââââââââââââââââââ
+# ── Exception report generator ───────────────────────────────
 
 def generate_exception_report(engine_result, output_path: str) -> str:
     """
@@ -906,7 +977,7 @@ def _write_debt_service_tab(wb: Workbook, engine_result):
     ws.column_dimensions['C'].width = 20
 
 
-# ââ Test/Demo ââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Test/Demo ────────────────────────────────────────────────
 
 if __name__ == "__main__":
     """
